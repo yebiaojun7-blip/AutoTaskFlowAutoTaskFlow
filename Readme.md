@@ -61,10 +61,14 @@ python .\tools\validate_project.py
 
 # 2. 单元测试
 python -m unittest discover -s .\tests -v
+python -m unittest tests.test_panel -v         # 只测主循环逻辑
 
 # 3. 无设备本地模拟（打印决策过程，含安全停止演示）
 python -m agent.runner --no-sleep
+python -m agent.runner "浏览商品 去完成" "绑定银行卡 去完成" --no-sleep
 ```
+
+改 Pipeline JSON 后务必先跑校验器：它能拦住 90% 的「看起来对但框架会静默忽略」的错误。
 
 需要真机时：
 
@@ -405,23 +409,4 @@ flowchart TD
 3. **跨应用跳转**：跳到外部 App（如直播间、浏览器）后的返回路径未覆盖，目前统一用 `KEYCODE_BACK`
 
 换句话说：**代码与配置是协议正确、被真实框架加载成功、且经 104 项测试验证的，主循环已在真机上把任务进度推到增长；换设备或淘宝改版后仍需用 `--probe` 抓一次实际截图来校准 OCR 文案。**
-
----
-
-## 开发命令
-
-```powershell
-python .\tools\validate_project.py            # 配置校验（改完 JSON 就跑）
-python -m unittest discover -s .\tests -v     # 全部测试
-python -m unittest tests.test_panel -v        # 只测主循环逻辑
-python -m agent.runner "浏览商品 去完成" "绑定银行卡 去完成" --no-sleep
-python -m tools.device_runner --probe         # 真机：只看 OCR 识别结果
-python -m tools.device_runner --users         # 真机：列出 Android 用户（找分身 ID）
-python -m tools.device_runner --user 999      # 真机：操作应用分身
-python -m tools.device_runner --max-rounds 2  # 真机：只跑 2 轮
-python -m tools.device_runner                 # 真机：完整跑一遍
-python -m tools.device_runner -v              # 真机：带调试日志
-```
-
-改 Pipeline JSON 后务必先跑校验器：它能拦住 90% 的「看起来对但框架会静默忽略」的错误。
 

@@ -75,8 +75,8 @@
 
 - 改动**不要**往 `README.md` 里追加「这次改了什么」——README 只描述**当前状态**，
   改动历史看 `git log`。所以提交信息必须把 what / why 写清（见下）。
-- 改完跑 `python smoke_test.py`（根目录，483 项断言，会自己指向临时库不污染开发数据），
-  **失败不能提交**。
+- 改完跑 `python -m tools.validate_project`（校验 PI v2 配置与引用闭合）和
+  `python -m unittest discover -s tests`（全部单元测试），**失败不能提交**。
 - 提交信息只描述改动，**不引用用户原话**。
 
 ### 提交信息怎么写（详见 `.github/instructions/commit-message.instructions.md`）

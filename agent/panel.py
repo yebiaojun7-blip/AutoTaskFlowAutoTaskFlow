@@ -31,13 +31,6 @@ PANEL_MARKERS = (
 # 面板至少要命中这么多个特征词才算"在面板"。单个弱特征不足以判定。
 PANEL_MIN_HITS = 2
 
-# 面板里的操作按钮文案，仅用于定位点击目标，不参与页面判定。
-PANEL_BUTTON_MARKERS = (
-    "去完成",
-    "领取奖励",
-    "立即领取",
-)
-
 # 可点击的按钮文案。任务名在左侧、按钮在右侧同一行，所以点击应打在按钮上。
 # 实测本机型上同一面板会混用「去完成」「去逛逛」「逛一逛」「领取奖励」。
 DEFAULT_ACTION_BUTTONS = (
@@ -233,11 +226,6 @@ OFFSITE_APPS = {
     "快手": "com.smile.gifmaker",
 }
 
-# 任务名里出现这些字样时，说明要走浏览器打开外部网页，
-# 只需要浏览器，任何手机都有。
-BROWSER_JUMP_MARKERS = ("去逛", "逛一逛", "浏览会场", "看直播")
-
-
 def required_package(task_text: str) -> str | None:
     """这个任务要点「打开」跳哪个应用；不需要外部应用时返回 None。
 
@@ -397,7 +385,7 @@ OPEN_APP_DIALOG_CONFIRM = (
 
 def open_app_dialog_visible(items: Iterable[OcrItem]) -> bool:
     """当前屏是否挡着「想要打开其他应用」的确认框。"""
-    return panel_visible(items, OPEN_APP_DIALOG_MARKERS, min_hits=1)
+    return panel_visible(items, OPEN_APP_DIALOG_MARKERS)
 
 
 def open_app_dialog_button(items: Iterable[OcrItem], words: Sequence[str]) -> OcrItem | None:

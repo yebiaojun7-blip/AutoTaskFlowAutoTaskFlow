@@ -13,7 +13,7 @@ import json
 import logging
 import re
 import time
-from typing import Any, Callable
+from typing import Any
 
 from agent import panel
 from agent.custom import app_user_id, load_config, start_app_command
