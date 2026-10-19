@@ -357,6 +357,17 @@ def validate_task_config(config: dict[str, Any]) -> int:
     if timing["min_task_delay_seconds"] > timing["max_task_delay_seconds"]:
         raise ValidationError("timing.min_task_delay_seconds 不能大于 max_task_delay_seconds")
 
+    app = config.get("app")
+    if not isinstance(app, dict):
+        raise ValidationError("config/tasks.json 缺少 app 对象")
+    for key in ("package", "activity"):
+        value = app.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise ValidationError(f"config/tasks.json 的 app.{key} 必须是非空字符串")
+    user_id = app.get("user_id")
+    if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id < 0:
+        raise ValidationError("config/tasks.json 的 app.user_id 必须是非负整数")
+
     return sum(len(config[key]) for key in TASK_CONFIG_LISTS)
 
 

@@ -21,10 +21,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any
+
+from agent.custom import APP_USER_ENV
 
 # 仓库根目录 = 本文件的上一级
 ROOT = Path(__file__).resolve().parent.parent
@@ -178,6 +182,7 @@ def probe(tasker: Any) -> int:
     from maa.pipeline import JOCR
 
     from agent import panel
+    from agent.custom import app_user_id, load_config
 
     controller = tasker.controller
     image = controller.post_screencap().wait().get()
@@ -188,6 +193,7 @@ def probe(tasker: Any) -> int:
     height, width = image.shape[:2]
     LOGGER.info("截图尺寸: %dx%d（点击坐标与此一致）", width, height)
     LOGGER.info("设备原始分辨率: %s", controller.resolution)
+    LOGGER.info("目标 Android 用户: %d", app_user_id(load_config()))
     dump_image(image, ROOT / "debug" / "probe.png")
 
     # post_recognition(识别类型, 识别参数, 图片)；返回的是 TaskJob，
@@ -241,13 +247,36 @@ def probe(tasker: Any) -> int:
     else:
         LOGGER.info("当前屏幕没有可执行任务（跳过: %s）", "、".join(pick.skipped) or "无")
     LOGGER.info("是否在淘金币面板: %s", panel.panel_visible(items))
+    LOGGER.info("当前页面类型: %s", _page_kind(items))
     return 0
 
 
-def run_task(tasker: Any, entry: str) -> int:
-    """从指定入口跑一遍完整任务链。"""
+def _page_kind(items: "list[Any]") -> str:
+    """把当前屏归类，便于校准日志一眼看出停在哪。"""
+    from agent import panel
+
+    if panel.daily_done_visible(items):
+        return "今日任务已完成（正常结束）"
+    if panel.panel_visible(items):
+        return "任务面板"
+    if panel.team_page_visible(items):
+        return "组队活动页（应退出）"
+    if panel.coin_home_visible(items):
+        return "淘金币首页（可点赚金币进面板）"
+    return "未知页面"
+
+
+def run_task(tasker: Any, entry: str, max_rounds: int | None = None) -> int:
+    """从指定入口跑一遍完整任务链。max_rounds 用于临时压低主循环轮数。"""
     LOGGER.info("开始执行任务，入口节点: %s", entry)
-    detail = tasker.post_task(entry).wait().get()
+    override = None
+    if max_rounds is not None:
+        # 第二个位置参数是 pipeline_override，用来临时覆盖节点参数。
+        override = {
+            "DailyTaskLoop": {"custom_action_param": json.dumps({"max_rounds": max_rounds})}
+        }
+        LOGGER.info("本轮限制最多 %d 轮", max_rounds)
+    detail = tasker.post_task(entry, override).wait().get()
     if detail is None:
         LOGGER.error("任务执行失败，没有拿到详情")
         return 1
@@ -287,6 +316,22 @@ def calibrate(tasker: Any, tap: tuple[int, int] | None, swipe: tuple[int, int, i
     return 0
 
 
+def list_users(controller: Any) -> int:
+    """列出设备上的 Android 用户，帮助确定应用分身所在的用户 ID。"""
+    job = controller.post_shell("pm list users")
+    job.wait()
+    output = str(job.get() or "")
+    LOGGER.info("设备上的 Android 用户：")
+    for line in output.splitlines():
+        if "UserInfo" in line:
+            LOGGER.info("  %s", line.strip())
+    LOGGER.info(
+        "淘宝安装情况可用 `adb shell pm list packages --user <ID> | findstr taobao` 核对。"
+        "应用分身通常是 MultiApp（本机为 999）。"
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="淘宝淘金币任务真机运行工具")
     parser.add_argument("--probe", action="store_true", help="只截图 + OCR，不执行任务")
@@ -297,12 +342,36 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--swipe", nargs=4, type=int, metavar=("X1", "Y1", "X2", "Y2"), help="校准：滑动屏幕"
     )
+    parser.add_argument(
+        "--users", action="store_true", help="列出设备上的 Android 用户（找应用分身用户 ID）"
+    )
+    parser.add_argument(
+        "--user",
+        type=int,
+        default=None,
+        metavar="ID",
+        help="目标 Android 用户：0 是主用户，应用分身通常为 999",
+    )
+    parser.add_argument(
+        "--max-rounds",
+        type=int,
+        default=None,
+        metavar="N",
+        help="限制主循环最多处理 N 轮（调试时用，默认取 Pipeline 配置）",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="输出调试日志")
     args = parser.parse_args(argv)
 
     setup_logging(args.verbose)
+
+    # 在加载框架前设置，actions.app_user_id() 只在运行时读取该环境变量。
+    if args.user is not None:
+        os.environ[APP_USER_ENV] = str(args.user)
+
     load_framework()
     controller = build_controller(args.address, args.adb)
+    if args.users:
+        return list_users(controller)
     tasker = build_resource(controller)
 
     try:
@@ -316,7 +385,7 @@ def main(argv: list[str] | None = None) -> int:
                 return code
         if args.probe or args.tap or args.swipe:
             return probe(tasker)
-        return run_task(tasker, args.entry)
+        return run_task(tasker, args.entry, args.max_rounds)
     finally:
         try:
             tasker.post_stop().wait()

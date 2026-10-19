@@ -1,7 +1,7 @@
 {
   "OpenTaobao": {
-    "action": "StartApp",
-    "package": "com.taobao.taobao",
+    "action": "Custom",
+    "custom_action": "taobao_start_app",
     "post_delay": 5000,
     "next": ["OpenCoinPage"]
   },
@@ -14,7 +14,7 @@
     "timeout": 15000,
     "max_hit": 1,
     "next": ["WaitCoinPanel"],
-    "on_error": ["AbortTask"]
+    "on_error": ["DailyTaskLoop"]
   },
   "WaitCoinPanel": {
     "recognition": "OCR",
@@ -23,7 +23,7 @@
     "pre_delay": 1500,
     "timeout": 15000,
     "next": ["DailyTaskLoop"],
-    "on_error": ["DailyDone", "AbortTask"]
+    "on_error": ["DailyDone", "DailyTaskLoop"]
   },
   "DailyDone": {
     "recognition": "OCR",

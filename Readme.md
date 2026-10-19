@@ -44,9 +44,9 @@ agent/panel.py                    →  纯逻辑（解析/排序/挑选），无
 │   ├── panel.py                    # OCR 解析与任务挑选（纯逻辑）
 │   ├── custom.py                   # 名单加载与任务分类
 │   └── runner.py                   # 无设备的本地模拟调度器
-├── config/tasks.json               # 黑名单 / 任务名单 / 时序参数
+├── config/tasks.json               # 黑名单 / 任务名单 / 时序参数 / 目标应用与用户
 ├── tools/validate_project.py       # 离线校验（PI v2 + 协议 + 引用闭合）
-└── tests/                          # 39 项单元测试
+└── tests/                          # 50 项单元测试
 ```
 
 ---
@@ -75,6 +75,13 @@ python -m tools.device_runner --probe
 
 # 3. 真跑一遍
 python -m tools.device_runner
+```
+
+跑应用分身时（淘宝装在 Android 独立用户下）：
+
+```powershell
+python -m tools.device_runner --users          # 先列出设备上的用户，确认分身 ID
+python -m tools.device_runner --user 999       # 再指定用户运行
 ```
 
 详见下方「真机运行」。
@@ -152,6 +159,47 @@ python -m tools.device_runner
 ```powershell
 python -m tools.device_runner --entry WaitCoinPanel
 ```
+
+调试时限制轮数，避免一次跑满 20 轮：
+
+```powershell
+python -m tools.device_runner --max-rounds 2
+```
+
+### 应用分身（多开）怎么跑
+
+淘宝在「应用分身」里时，它是装在**另一个 Android 用户**下，不是同一个安装。本机实测：主用户 `user 0`，分身 `user 999:MultiApp`。
+
+这一点很关键：Pipeline 的 `StartApp` 动作**没有 user 参数**，永远只会拉起主用户那个淘宝。所以项目改用自己的 `taobao_start_app` 自定义动作，走 `am start --user <ID>`。
+
+先确认设备上有哪些用户：
+
+```powershell
+python -m tools.device_runner --users
+```
+
+输出里的 `UserInfo{999:MultiApp}` 就是应用分身。确认淘宝装在该用户下：
+
+```powershell
+adb shell pm list packages --user 999 | findstr taobao
+```
+
+两种方式指定用户，环境变量优先：
+
+```powershell
+python -m tools.device_runner --user 999
+```
+
+```jsonc
+// config/tasks.json
+"app": {
+  "package": "com.taobao.taobao",
+  "activity": "com.taobao.tao.welcome.Welcome",
+  "user_id": 999
+}
+```
+
+> `activity` 必须显式写。通用 LAUNCHER intent 在分身用户下解析不到淘宝（`unable to resolve Intent`），`monkey -p` 在 Android 14 上不支持 `--user`。
 
 ### 首次上机要校准的 5 件事
 
@@ -252,14 +300,18 @@ flowchart TD
 ### 已实现并离线验证
 
 - PI v2 配置、Pipeline 全部使用合法动作与字段
-- **真实 MaaFramework v5.14.3 加载资源包成功：12 个节点全部被框架接受**（不只是解析 JSON）
+- **真实 MaaFramework v5.14.3 加载资源包成功：13 个节点全部被框架接受**（不只是解析 JSON）
 - 自定义动作 `taobao_daily_loop` 可在**进程内**注册成功（`Resource.register_custom_action` 返回 `True`），不需要 agent 子进程
 - Agent 自定义动作 `taobao_daily_loop`（截图 → OCR → 过滤 → 挑选 → 点击 → 等待 → 返回 → 复查）
 - 安全验证检测与主动停止（返回 `False` → `on_error` → `AbortTask`）
 - 黑名单 / 已完成跳过，任务名与按钮同行匹配
 - 搜索任务：定位输入框 → 输入关键词 → 提交
 - 轮次上限、空轮退避、随机延迟
-- 39 项单元测试（分类优先级、OCR 解析、按钮定位、主循环、5 个破坏性校验用例）
+- 页面类型判别：任务面板 / 组队活动页 / 赛车首页 / 今日已完成，四种局面分开处理
+- 页面走丢时自动恢复：组队页按返回退出，赛车首页点「赚金币」重开面板
+- 今日任务已全部完成时正常结束，不误判为失败
+- 应用分身支持（`am start --user <ID>`）
+- 50 项单元测试（分类优先级、OCR 解析、按钮定位、主循环、页面判别、分身启动、5 个破坏性校验用例）
 - 离线校验器（PI v2 + 协议枚举 + 参数类型 + 引用闭合 + 可达性 + 自定义动作注册）
 
 ### 需要真机才能完成的部分（当前**未**验证）
@@ -271,7 +323,7 @@ flowchart TD
 3. **停留时长与坐标**：`browse_duration_seconds` 等参数是经验值，任务是否判定达成需实测
 4. **跨应用跳转**：跳到外部 App（如直播间、浏览器）后的返回路径未覆盖，目前统一用 `KEYCODE_BACK`
 
-换句话说：**代码与配置是协议正确、被真实框架加载成功、且经 39 项测试验证的；但首次上真机仍必须用 `--probe` 抓一次实际截图来校准 OCR 文案。**
+换句话说：**代码与配置是协议正确、被真实框架加载成功、且经 50 项测试验证的；但首次上真机仍必须用 `--probe` 抓一次实际截图来校准 OCR 文案。**
 
 ---
 
@@ -283,6 +335,9 @@ python -m unittest discover -s .\tests -v     # 全部测试
 python -m unittest tests.test_panel -v        # 只测主循环逻辑
 python -m agent.runner "浏览商品 去完成" "绑定银行卡 去完成" --no-sleep
 python -m tools.device_runner --probe         # 真机：只看 OCR 识别结果
+python -m tools.device_runner --users         # 真机：列出 Android 用户（找分身 ID）
+python -m tools.device_runner --user 999      # 真机：操作应用分身
+python -m tools.device_runner --max-rounds 2  # 真机：只跑 2 轮
 python -m tools.device_runner                 # 真机：完整跑一遍
 python -m tools.device_runner -v              # 真机：带调试日志
 ```

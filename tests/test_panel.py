@@ -7,11 +7,12 @@ run_recognition / post_click，从而验证 agent/actions.py 的流程编排是�
 from __future__ import annotations
 
 import logging
+import os
 import unittest
 from types import SimpleNamespace
 
 from agent import actions, panel
-from agent.custom import load_config
+from agent.custom import APP_USER_ENV, app_user_id, load_config, start_app_command
 
 
 class FakeJob:
@@ -35,6 +36,7 @@ class FakeController:
         self.keys: list[int] = []
         self.swipes: list[tuple[int, int, int, int]] = []
         self.inputs: list[str] = []
+        self.shells: list[str] = []
         self.resolution = list(size)
 
     def post_screencap(self) -> FakeJob:
@@ -57,6 +59,10 @@ class FakeController:
     def post_input_text(self, text) -> FakeJob:  # noqa: ANN001
         self.inputs.append(str(text))
         return FakeJob()
+
+    def post_shell(self, cmd, timeout=20000) -> FakeJob:  # noqa: ANN001
+        self.shells.append(str(cmd))
+        return FakeJob("")
 
 
 class FakeContext:
@@ -334,6 +340,47 @@ class DailyDoneTest(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(context.controller.clicks, [])
         self.assertEqual(context.controller.keys, [])
+
+
+class AppUserTest(unittest.TestCase):
+    """应用分身跑在独立 Android 用户下（本机 999），必须按配置指定用户。"""
+
+    def tearDown(self) -> None:
+        os.environ.pop(APP_USER_ENV, None)
+
+    def test_start_command_targets_configured_user(self) -> None:
+        command = start_app_command("com.taobao.taobao", "com.taobao.tao.welcome.Welcome", 999)
+        self.assertEqual(
+            command,
+            "am start --user 999 -n com.taobao.taobao/com.taobao.tao.welcome.Welcome",
+        )
+
+    def test_user_id_reads_config(self) -> None:
+        config = load_config()
+        config["app"] = {**config["app"], "user_id": 999}
+        self.assertEqual(app_user_id(config), 999)
+
+    def test_environment_overrides_config(self) -> None:
+        """临时切用户不该改配置文件，环境变量优先级更高。"""
+        config = load_config()
+        config["app"] = {**config["app"], "user_id": 0}
+        os.environ[APP_USER_ENV] = "999"
+        self.assertEqual(app_user_id(config), 999)
+
+    def test_invalid_user_id_is_rejected(self) -> None:
+        config = load_config()
+        config["app"] = {**config["app"], "user_id": "999"}
+        with self.assertRaises(ValueError):
+            app_user_id(config)
+
+    def test_start_app_runs_shell_with_user_flag(self) -> None:
+        context = FakeContext([PANEL_ROW])
+        config = load_config()
+        config["app"] = {**config["app"], "user_id": 999}
+
+        self.assertTrue(actions.start_app(context, config))
+        self.assertEqual(len(context.controller.shells), 1)
+        self.assertIn("--user 999", context.controller.shells[0])
 
 
 if __name__ == "__main__":

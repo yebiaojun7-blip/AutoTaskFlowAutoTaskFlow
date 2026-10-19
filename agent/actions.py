@@ -15,7 +15,7 @@ import time
 from typing import Any, Callable
 
 from agent import panel
-from agent.custom import load_config
+from agent.custom import app_user_id, load_config, start_app_command
 
 LOGGER = logging.getLogger("autotaskflow")
 
@@ -129,6 +129,33 @@ def _run_task(context: Any, pick: panel.PanelPick, config: dict[str, Any], butto
 
 def _scan(context: Any, node: str = "PanelFullOcr") -> list[panel.OcrItem]:
     return _ocr_items(context, _screencap(context), node)
+
+
+def start_app(context: Any, config: dict[str, Any]) -> bool:
+    """按配置启动淘宝，支持应用分身所在的独立 Android 用户。
+
+    为什么不用 Pipeline 的 StartApp 动作：协议里的 StartApp 只有 package 参数，
+    由框架固定以当前用户（通常是 user 0）启动。应用分身是另一个 Android 用户
+    （本机为 user 999），用 StartApp 永远只会打开主用户那个淘宝。
+    """
+    app = config.get("app") or {}
+    package = str(app.get("package") or "com.taobao.taobao")
+    activity = str(app.get("activity") or "com.taobao.tao.welcome.Welcome")
+    try:
+        user_id = app_user_id(config)
+        command = start_app_command(package, activity, user_id)
+    except ValueError as exc:
+        LOGGER.error("启动参数不合法：%s", exc)
+        return False
+
+    LOGGER.info("启动 %s（Android 用户 %d）", package, user_id)
+    job = _controller(context).post_shell(command)
+    job.wait()
+    result = job.get()
+    if result is None or "Error" in str(result):
+        LOGGER.warning("启动命令返回异常：%s", result)
+
+    return True
 
 
 def _recover_to_panel(context: Any, config: dict[str, Any], *, tries: int = 4) -> bool:
@@ -252,6 +279,18 @@ def register(agent_server: Any) -> None:
 
     from maa.context import Context
     from maa.custom_action import CustomAction
+
+    @agent_server.custom_action("taobao_start_app")
+    class TaobaoStartApp(CustomAction):
+        """启动淘宝，可指定应用分身所在的 Android 用户。"""
+
+        def run(self, context: Context, argv: Any) -> bool:
+            try:
+                config = load_config()
+            except Exception as exc:  # noqa: BLE001 - 配置读不出来必须显式失败
+                LOGGER.error("读取任务配置失败：%s", exc)
+                return False
+            return start_app(context, config)
 
     @agent_server.custom_action("taobao_daily_loop")
     class TaobaoDailyLoop(CustomAction):

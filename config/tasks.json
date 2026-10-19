@@ -46,5 +46,10 @@
     "browse_duration_seconds": 3,
     "jump_duration_seconds": 5,
     "max_empty_rounds": 3
+  },
+  "app": {
+    "package": "com.taobao.taobao",
+    "activity": "com.taobao.tao.welcome.Welcome",
+    "user_id": 0
   }
 }
