@@ -32,7 +32,12 @@ class AgentBehaviorTest(unittest.TestCase):
         )
         self.assertTrue(result.stopped)
         self.assertEqual(result.completed, 1)
-        self.assertEqual(controller.actions, ["click:浏览商品", "wait:3", "back"])
+        # 停留时长来自配置，不要在测试里写死具体秒数。
+        browse_seconds = self.config["timing"]["browse_duration_seconds"]
+        self.assertEqual(
+            controller.actions,
+            ["click:浏览商品", f"wait:{browse_seconds:g}", "back"],
+        )
 
 
 if __name__ == "__main__":

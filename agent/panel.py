@@ -5,8 +5,9 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from typing import Any, Iterable, Sequence
+from typing import Any, Collection, Iterable, Sequence
 
 from agent.custom import TaskDecision, classify_task, load_config
 
@@ -88,6 +89,21 @@ class PanelPick:
 def normalize_text(text: Any) -> str:
     """去掉文本中的空白，OCR 常把中文字之间插入空格。"""
     return "".join(str(text).split())
+
+
+_PROGRESS_RE = re.compile(r"[(（]\s*(\d+)\s*/\s*(\d+)\s*[)）]")
+
+
+def task_progress(text: str) -> tuple[int, int] | None:
+    """从任务文字里取出进度，例如「拍立淘逛感兴趣的宝贝(3/5)」→ (3, 5)。
+
+    淘宝的任务进度直接写在任务名里。拿到它才能判断一次点击到底有没有生效：
+    停留时间不够时进度不会增加，任务会一直停在 (0/5)，主循环只看轮次是发现不了的。
+    """
+    match = _PROGRESS_RE.search(normalize_text(text))
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
 
 
 def _field(raw: Any, name: str, default: Any = None) -> Any:
@@ -277,16 +293,22 @@ def pick_task(
     config: dict[str, Any] | None = None,
     *,
     kinds: Sequence[str] | None = None,
+    exclude: Collection[str] = (),
 ) -> PanelPick:
     """按阅读顺序挑出第一个可执行任务。
 
     黑名单、已完成等不可执行项会被记录到 skipped 中，便于日志排查。
     kinds 用于限定只挑选某一类任务（Pipeline 中区分搜索/浏览/跳转分支）。
+    exclude 里的任务名会被跳过，用于放弃那些反复执行也不推进的任务。
     """
     config = config or load_config()
     allowed = tuple(kinds) if kinds else EXECUTABLE_KINDS
     skipped: list[str] = []
     for item in items:
+        text = normalize_text(item.text)
+        if text in exclude:
+            skipped.append(f"{text}(已放弃)")
+            continue
         decision = classify_task(item.text, config)
         if decision.kind in allowed:
             return PanelPick(decision, item, tuple(skipped))

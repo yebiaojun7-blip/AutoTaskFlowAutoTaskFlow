@@ -90,6 +90,7 @@ def fast_config() -> dict:
         "browse_duration_seconds": 0,
         "jump_duration_seconds": 0,
         "max_empty_rounds": 1,
+        "max_attempts_per_task": 2,
     }
     return config
 
@@ -539,6 +540,76 @@ class CustomActionParamTest(unittest.TestCase):
         loop_cls = _registered_action("taobao_daily_loop")
         self.assertTrue(loop_cls().run(context, argv))
         self.assertEqual(len(context.controller.clicks), 1)
+
+
+class ProgressTest(unittest.TestCase):
+    """任务进度写在任务名里，读它才能知道一次点击有没有真的生效。"""
+
+    def test_progress_is_parsed_from_task_text(self) -> None:
+        self.assertEqual(panel.task_progress("拍立淘逛感兴趣的宝贝(3/5)"), (3, 5))
+        self.assertEqual(panel.task_progress("好物沉浸看（0/5）"), (0, 5))
+        self.assertEqual(panel.task_progress("浏览商品 ( 12 / 20 )"), (12, 20))
+
+    def test_text_without_progress_returns_none(self) -> None:
+        for text in ("浏览商品", "去完成", "(3/5", "3/5)"):
+            with self.subTest(text=text):
+                self.assertIsNone(panel.task_progress(text))
+
+    def test_stalled_task_is_not_retried_forever(self) -> None:
+        """进度一直 0/5 时必须放弃该任务，否则会无限重试同一个。"""
+        stuck = [
+            text_item("赚金币抵钱", 100, 150, 300, 48),
+            text_item("今日累计奖励", 100, 220, 240, 40),
+            text_item("浏览商品(0/5)", 100, 300),
+            text_item("去完成", 900, 300, 120, 40),
+        ]
+        context = FakeContext([stuck])
+        result = actions.run_daily_loop(context, fast_config(), max_rounds=10)
+
+        self.assertTrue(result)
+        # max_attempts_per_task=2：尝试两次仍无进展就放弃，不会耗掉全部轮次。
+        self.assertEqual(len(context.controller.clicks), 2)
+
+    def test_task_without_progress_field_is_also_abandoned(self) -> None:
+        """「点击去逛+30」没有 (x/y) 进度，靠执行次数兜底。"""
+        stuck = [
+            text_item("赚金币抵钱", 100, 150, 300, 48),
+            text_item("今日累计奖励", 100, 220, 240, 40),
+            text_item("点击去逛+30", 100, 300),
+        ]
+        context = FakeContext([stuck])
+        result = actions.run_daily_loop(context, fast_config(), max_rounds=10)
+
+        self.assertTrue(result)
+        self.assertEqual(len(context.controller.clicks), 2)
+
+    def test_task_that_progresses_is_kept(self) -> None:
+        def panel_with(progress: int) -> list[dict]:
+            return [
+                text_item("赚金币抵钱", 100, 150, 300, 48),
+                text_item("今日累计奖励", 100, 220, 240, 40),
+                text_item(f"浏览商品({progress}/3)", 100, 300),
+                text_item("去完成", 900, 300, 120, 40),
+            ]
+
+        # 进度在涨就一直做下去，不应被 max_attempts_per_task 提前放弃。
+        screens = [
+            panel_with(0),
+            panel_with(1),
+            panel_with(1),
+            panel_with(1),
+            panel_with(2),
+            panel_with(2),
+            panel_with(2),
+            panel_with(3),
+            panel_with(3),
+            panel_with(3),
+        ]
+        context = FakeContext(screens)
+        result = actions.run_daily_loop(context, fast_config(), max_rounds=10)
+
+        self.assertTrue(result)
+        self.assertGreaterEqual(len(context.controller.clicks), 3)
 
 
 if __name__ == "__main__":

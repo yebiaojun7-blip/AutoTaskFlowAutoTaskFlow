@@ -228,9 +228,15 @@ def run_daily_loop(context: Any, config: dict[str, Any], *, max_rounds: int = DE
         False —— 主动安全停止（命中安全验证），调用方应终止任务
     """
     max_empty = int(config.get("timing", {}).get("max_empty_rounds", 3))
+    max_attempts = int(config.get("timing", {}).get("max_attempts_per_task", 2))
     empty_rounds = 0
     completed = 0
     attempt = 0
+    # 同一个任务该执行几次就够。淘宝的任务面板会把没做完的任务一直摆在原位，
+    # 若每次扫描都挑中同一个（例如「点击去逛+30」），停留再久也不会推进，
+    # 就会把轮次全部耗在它身上。这里按任务名记执行次数，超过上限就放弃。
+    tried: dict[str, int] = {}
+    abandoned: set[str] = set()
 
     for round_index in range(1, max_rounds + 1):
         items = _scan(context)
@@ -254,10 +260,13 @@ def run_daily_loop(context: Any, config: dict[str, Any], *, max_rounds: int = DE
             # 刚恢复就被判定为"今日任务已完成"，直接结束整轮任务。
             continue
 
-        pick = panel.pick_task(items, config)
+        pick = panel.pick_task(items, config, exclude=abandoned)
         if pick.item is None:
             if pick.skipped:
                 LOGGER.info("本轮不可执行项：%s", ", ".join(pick.skipped))
+            if abandoned:
+                LOGGER.info("剩余任务都已尝试过 %d 次，无法继续推进，结束", max_attempts)
+                return True
             LOGGER.info("第 %d 轮：当前屏无可执行任务，滑回顶部复查", round_index)
             _swipe_up(context)
             items = _scan(context)
@@ -265,7 +274,7 @@ def run_daily_loop(context: Any, config: dict[str, Any], *, max_rounds: int = DE
             if safety:
                 LOGGER.error("复查时命中安全验证「%s」，立即停止任务", safety.text)
                 return STOP_SIGNAL
-            pick = panel.pick_task(items, config)
+            pick = panel.pick_task(items, config, exclude=abandoned)
             if pick.item is None:
                 empty_rounds += 1
                 if empty_rounds >= max_empty:
@@ -273,6 +282,7 @@ def run_daily_loop(context: Any, config: dict[str, Any], *, max_rounds: int = DE
                     return True
                 continue
 
+        name = panel.normalize_text(pick.item.text)
         button = panel.find_action_button(items, pick.item) or pick.item
         LOGGER.info(
             "第 %d 轮：执行「%s」（%s），按钮「%s」",
@@ -289,10 +299,40 @@ def run_daily_loop(context: Any, config: dict[str, Any], *, max_rounds: int = DE
         if not _recover_to_panel(context, config):
             LOGGER.warning("任务后未能回到任务面板")
 
+        tried[name] = tried.get(name, 0) + 1
+        if _progress_stuck(context, name, tried[name], max_attempts):
+            abandoned.add(name)
+            LOGGER.warning(
+                "任务「%s」已尝试 %d 次仍无进展，本次跳过它", name, tried[name]
+            )
+
         _sleep(_random_delay(config))
 
     LOGGER.info("达到轮次上限 %d，已执行 %d 个任务", max_rounds, completed)
     return True
+
+
+def _progress_stuck(context: Any, name: str, attempts: int, max_attempts: int) -> bool:
+    """判断某个任务是否该放弃。
+
+    任务名里带 (x/y) 进度时以进度为准：涨了就继续，没涨且已达上限就放弃。
+    不带进度时（例如「点击去逛+30」）只能看执行次数，到上限就放弃。
+    """
+    progress = _find_progress(context, name)
+    if progress is not None and progress[0] > 0:
+        return False
+    return attempts >= max_attempts
+
+
+def _find_progress(context: Any, name: str) -> tuple[int, int] | None:
+    """在任务面板上找到同名任务，读它的进度。"""
+    key = name[:6]
+    for item in _scan(context):
+        if panel.normalize_text(item.text).startswith(key):
+            progress = panel.task_progress(item.text)
+            if progress is not None:
+                return progress
+    return None
 
 
 def _random_delay(config: dict[str, Any]) -> float:
