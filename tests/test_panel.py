@@ -98,12 +98,39 @@ def text_item(text: str, x: int, y: int, width: int = 200, height: int = 40) -> 
     return {"text": text, "box": [x, y, width, height], "score": 0.95}
 
 
+def _registered_action(name: str):
+    """取回 register() 里注册的动作类，避免测试重复声明一遍。"""
+
+    class _Collector:
+        def __init__(self) -> None:
+            self.actions: dict = {}
+
+        def custom_action(self, action_name: str):
+            def wrapper(cls):
+                self.actions[action_name] = cls
+                return cls
+
+            return wrapper
+
+    collector = _Collector()
+    actions.register(collector)
+    return collector.actions[name]
+
+
 PANEL_ROW = [
+    text_item("赚金币抵钱", 100, 150, 300, 48),
+    text_item("今日累计奖励", 100, 220, 240, 40),
     text_item("浏览商品", 100, 300),
     text_item("去完成", 900, 300, 120, 40),
 ]
 
-DONE_ONLY = [text_item("已领取", 100, 300), text_item("今日累计奖励", 100, 200)]
+# 面板上一行任务全部领完的样子：任务按钮变成「已领取」，面板特征仍在。
+DONE_ONLY = [
+    text_item("赚金币抵钱", 100, 150, 300, 48),
+    text_item("今日累计奖励", 100, 220, 240, 40),
+    text_item("完成进度 20/20", 100, 260, 260, 36),
+    text_item("已领取", 100, 300),
+]
 
 
 class PanelParseTest(unittest.TestCase):
@@ -132,7 +159,9 @@ class PanelParseTest(unittest.TestCase):
 
     def test_action_button_is_on_same_row_right_side(self) -> None:
         items = panel.parse_ocr_items(PANEL_ROW)
-        button = panel.find_action_button(items, items[0])
+        task = panel.find_text_by_keywords(items, ("浏览商品",))
+        assert task is not None
+        button = panel.find_action_button(items, task)
         self.assertIsNotNone(button)
         assert button is not None
         self.assertEqual(button.text, "去完成")
@@ -174,8 +203,8 @@ class PickTaskTest(unittest.TestCase):
         pick = panel.pick_task(items, self.config)
         assert pick.item is not None
         self.assertEqual(pick.decision.kind, "search")
-        # keyword 是点击目标，search_keyword 才是要输入的关键词。
-        self.assertEqual(pick.decision.keyword, "搜索")
+        # keyword 是点击目标（面板上的任务名），search_keyword 才是要输入的关键词。
+        self.assertEqual(pick.decision.keyword, "搜索商品")
         self.assertIn(pick.decision.search_keyword, self.config["search_keywords"])
 
     def test_no_executable_task_returns_none(self) -> None:
@@ -214,6 +243,8 @@ class DailyLoopTest(unittest.TestCase):
 
     def test_blacklist_only_panel_does_not_click(self) -> None:
         blacklist_only = [
+            text_item("赚金币抵钱", 100, 150, 300, 48),
+            text_item("今日累计奖励", 100, 220, 240, 40),
             text_item("绑定银行卡", 100, 300),
             text_item("去完成", 900, 300, 120, 40),
         ]
@@ -235,6 +266,8 @@ class DailyLoopTest(unittest.TestCase):
 
     def test_search_task_types_keyword(self) -> None:
         search_panel = [
+            text_item("赚金币抵钱", 100, 150, 300, 48),
+            text_item("今日累计奖励", 100, 220, 240, 40),
             text_item("搜索商品", 100, 300),
             text_item("去完成", 900, 300, 120, 40),
         ]
@@ -342,6 +375,47 @@ class DailyDoneTest(unittest.TestCase):
         self.assertEqual(context.controller.keys, [])
 
 
+class HomeMisjudgeTest(unittest.TestCase):
+    """淘宝首页上有「立即领取」和「搜索」，不能因此被当成任务面板。"""
+
+    HOME = [
+        text_item("关注", 25, 90, 74, 45),
+        text_item("推荐", 114, 85, 85, 55),
+        text_item("搜索", 593, 168, 73, 44),
+        text_item("立即领取", 110, 448, 53, 32),
+        text_item("领淘金币充值中心试用领取常买超市", 245, 443, 447, 28),
+    ]
+
+    REAL_PANEL = [
+        text_item("赚金币抵钱", 100, 120, 300, 48),
+        text_item("今日累计奖励", 100, 200, 240, 40),
+        text_item("完成进度 3/20", 100, 250, 260, 36),
+        text_item("浏览商品", 100, 300),
+        text_item("去完成", 900, 300, 120, 40),
+    ]
+
+    def test_home_is_not_a_task_panel(self) -> None:
+        items = panel.parse_ocr_items(self.HOME)
+        # 首页上的「立即领取」不再算面板特征，严格判定必须为 False。
+        self.assertFalse(panel.panel_visible(items))
+        self.assertFalse(panel.task_panel_visible(items))
+
+    def test_real_panel_is_recognized(self) -> None:
+        items = panel.parse_ocr_items(self.REAL_PANEL)
+        self.assertTrue(panel.task_panel_visible(items))
+
+    def test_single_marker_is_not_enough(self) -> None:
+        only_one = panel.parse_ocr_items([text_item("赚金币抵钱", 100, 120, 300, 48)])
+        self.assertFalse(panel.task_panel_visible(only_one))
+
+    def test_home_search_box_is_not_a_task(self) -> None:
+        """首页上的「搜索」框不能被当成搜索任务去点击。"""
+        config = load_config()
+        items = panel.parse_ocr_items(self.HOME)
+        pick = panel.pick_task(items, config)
+        self.assertIsNone(pick.item)
+
+
 class CoinEntryTest(unittest.TestCase):
     """首页那一排图标会被 OCR 合并成一个文字块，点击点必须按关键词折算。"""
 
@@ -433,6 +507,38 @@ class AppUserTest(unittest.TestCase):
         self.assertTrue(actions.start_app(context, config))
         self.assertEqual(len(context.controller.shells), 1)
         self.assertIn("--user 999", context.controller.shells[0])
+
+
+class CustomActionParamTest(unittest.TestCase):
+    """自定义动作参数会被框架再序列化一次，解析必须容忍多层 JSON。"""
+
+    def test_dict_is_returned_as_is(self) -> None:
+        argv = SimpleNamespace(custom_action_param={"max_rounds": 3})
+        self.assertEqual(actions._parse_params(argv), {"max_rounds": 3})
+
+    def test_single_and_double_encoded_json_both_work(self) -> None:
+        single = SimpleNamespace(custom_action_param='{"max_rounds": 3}')
+        double = SimpleNamespace(custom_action_param='"{\\"max_rounds\\": 3}"')
+        self.assertEqual(actions._parse_params(single), {"max_rounds": 3})
+        self.assertEqual(actions._parse_params(double), {"max_rounds": 3})
+
+    def test_empty_and_garbage_fall_back_to_empty_dict(self) -> None:
+        for raw in ("", "   ", None, "不是 JSON", "[1, 2]"):
+            with self.subTest(raw=raw):
+                argv = SimpleNamespace(custom_action_param=raw)
+                self.assertEqual(actions._parse_params(argv), {})
+
+    def test_missing_attribute_is_tolerated(self) -> None:
+        self.assertEqual(actions._parse_params(SimpleNamespace()), {})
+
+    def test_double_encoded_param_actually_limits_rounds(self) -> None:
+        """真机复现过的崩溃点：参数被双层编码后 max_rounds 取不到。"""
+        context = FakeContext([PANEL_ROW])
+        argv = SimpleNamespace(custom_action_param='"{\\"max_rounds\\": 1}"')
+
+        loop_cls = _registered_action("taobao_daily_loop")
+        self.assertTrue(loop_cls().run(context, argv))
+        self.assertEqual(len(context.controller.clicks), 1)
 
 
 if __name__ == "__main__":

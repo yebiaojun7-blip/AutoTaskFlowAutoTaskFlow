@@ -171,7 +171,7 @@ def _recover_to_panel(context: Any, config: dict[str, Any], *, tries: int = 6) -
     """
     for _ in range(tries):
         items = _scan(context)
-        if panel.panel_visible(items):
+        if panel.task_panel_visible(items):
             return True
         if panel.daily_done_visible(items):
             LOGGER.info("今日任务已全部完成，无需回到任务面板")
@@ -207,7 +207,7 @@ def _recover_to_panel(context: Any, config: dict[str, Any], *, tries: int = 6) -
 
         _back(context)
 
-    return panel.panel_visible(_scan(context))
+    return panel.task_panel_visible(_scan(context))
 
 
 def open_coin_page(context: Any, config: dict[str, Any]) -> bool:
@@ -245,7 +245,7 @@ def run_daily_loop(context: Any, config: dict[str, Any], *, max_rounds: int = DE
             LOGGER.info("检测到「今日奖励已拿完」提示，今日任务已完成，正常结束")
             return True
 
-        if not panel.panel_visible(items):
+        if not panel.task_panel_visible(items):
             LOGGER.info("第 %d 轮：不在任务面板，尝试回到面板", round_index)
             if not _recover_to_panel(context, config):
                 LOGGER.error("无法回到淘金币任务面板，停止任务")
@@ -306,6 +306,27 @@ def _random_delay(config: dict[str, Any]) -> float:
     return random.uniform(low, high)
 
 
+def _parse_params(argv: Any) -> dict[str, Any]:
+    """把自定义动作的 custom_action_param 解析成 dict。
+
+    框架透传该字段时可能给出 dict，也可能给出 JSON 字符串；而调用方如果先
+    json.dumps 过再塞进 pipeline_override，字符串里还会嵌一层 JSON。
+    这里一律解到 dict 为止，避免下游再出现 'str' has no attribute 'get'。
+    """
+    raw = getattr(argv, "custom_action_param", "") or ""
+    for _ in range(3):
+        if isinstance(raw, dict):
+            return raw
+        if not isinstance(raw, str) or not raw.strip():
+            return {}
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            LOGGER.warning("custom_action_param 不是合法 JSON，忽略：%s", raw)
+            return {}
+    return raw if isinstance(raw, dict) else {}
+
+
 def register(agent_server: Any) -> None:
     """把动作注册到 AgentServer。分离出来便于在没有 maa 时也能导入本模块。"""
 
@@ -341,14 +362,11 @@ def register(agent_server: Any) -> None:
         """跑完一整轮淘金币日常任务。custom_action_param 支持 max_rounds 覆盖。"""
 
         def run(self, context: Context, argv: Any) -> bool:
-            params: dict[str, Any] = {}
-            raw = getattr(argv, "custom_action_param", "") or ""
-            if raw.strip():
-                try:
-                    params = json.loads(raw)
-                except json.JSONDecodeError:
-                    LOGGER.warning("custom_action_param 不是合法 JSON，忽略：%s", raw)
-            max_rounds = int(params.get("max_rounds", DEFAULT_MAX_ROUNDS))
+            try:
+                max_rounds = int(_parse_params(argv).get("max_rounds", DEFAULT_MAX_ROUNDS))
+            except (TypeError, ValueError):
+                LOGGER.warning("max_rounds 不是整数，改用默认值 %d", DEFAULT_MAX_ROUNDS)
+                max_rounds = DEFAULT_MAX_ROUNDS
 
             try:
                 config = load_config()

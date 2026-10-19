@@ -17,10 +17,21 @@ EXECUTABLE_KINDS = ("search", "jump", "browse")
 # 任务面板的特征词，用于判断"当前是否还停留在淘金币任务面板"。
 # 真机（一加 Ace 3 / 淘宝 双11版）实测：面板标题为「赚金币抵钱」，
 # 首屏一定能看到「今日累计奖励」与「完成进度 x/20」。
+#
+# 注意不要把「立即领取」「领取奖励」「去完成」这类通用按钮词放进来：
+# 淘宝首页和促销浮层上也有「立即领取」，只命中一个词就会把首页误判成面板，
+# 于是主循环把首页的「搜索」框当成搜索任务去点（实测点了 (629,190) 十几次）。
 PANEL_MARKERS = (
     "赚金币抵钱",
     "今日累计奖励",
     "完成进度",
+)
+
+# 面板至少要命中这么多个特征词才算"在面板"。单个弱特征不足以判定。
+PANEL_MIN_HITS = 2
+
+# 面板里的操作按钮文案，仅用于定位点击目标，不参与页面判定。
+PANEL_BUTTON_MARKERS = (
     "去完成",
     "领取奖励",
     "立即领取",
@@ -139,13 +150,29 @@ def find_text_by_keywords(items: Iterable[OcrItem], keywords: Iterable[str]) -> 
     return None
 
 
-def panel_visible(items: Iterable[OcrItem], markers: Iterable[str] = PANEL_MARKERS) -> bool:
-    """当前屏是否仍显示淘金币任务面板。"""
+def panel_visible(
+    items: Iterable[OcrItem],
+    markers: Iterable[str] = PANEL_MARKERS,
+    *,
+    min_hits: int = 1,
+) -> bool:
+    """当前屏是否仍显示淘金币任务面板。
+
+    min_hits 用于需要更严格判定的场合：首页和促销浮层上也会出现「立即领取」
+    之类的通用按钮词，只命中一个词不足以说明这是任务面板。
+    """
+    wanted = [normalize_text(marker) for marker in markers]
+    wanted = [word for word in wanted if word]
+    if not wanted:
+        return False
+
+    hits: set[str] = set()
     for item in items:
-        for marker in markers:
-            normalized = normalize_text(marker)
-            if normalized and normalized in item.text:
-                return True
+        for word in wanted:
+            if word in item.text:
+                hits.add(word)
+        if len(hits) >= min_hits:
+            return True
     return False
 
 
@@ -192,6 +219,16 @@ DAILY_DONE_MARKERS = (
 def daily_done_visible(items: Iterable[OcrItem]) -> bool:
     """当前屏是否显示"今日任务已全部完成"提示。"""
     return panel_visible(items, DAILY_DONE_MARKERS)
+
+
+def task_panel_visible(items: Iterable[OcrItem]) -> bool:
+    """严格判定当前屏是否真的在淘金币任务面板。
+
+    和 panel_visible 的区别：至少要命中 PANEL_MIN_HITS 个面板专属特征词。
+    首页、促销浮层、搜索结果页都可能零星出现「立即领取」，用单标记判定会把它们
+    当成面板，进而把页面上的「搜索」框误认成搜索任务。
+    """
+    return panel_visible(items, PANEL_MARKERS, min_hits=PANEL_MIN_HITS)
 
 
 def team_page_visible(items: Iterable[OcrItem]) -> bool:
