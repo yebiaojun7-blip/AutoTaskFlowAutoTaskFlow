@@ -169,6 +169,14 @@ COIN_HOME_MARKERS = (
 # 淘金币首页上打开任务面板的入口文字。
 COIN_HOME_ENTRY = ("赚金币",)
 
+# 淘宝首页上通往淘金币的入口文字。真机实测首页那一排图标会被 OCR 合并成一条，
+# 例如「领淘金币充值中心试用领取常买超市」，所以只能按字符占比推算点击位置。
+COIN_ENTRY_KEYWORDS = ("淘金币", "领金币", "我的淘金币")
+
+# 淘宝首页的特征词，用于区分"首页"和"启动后的促销浮层"。
+# 首页按返回键会直接退出淘宝，促销浮层则必须按返回才能关掉，两者处理相反。
+TB_HOME_MARKERS = ("搜索", "推荐", "关注", "购物车")
+
 # 今日任务全部完成时弹窗的特征词。
 # 真机实测：弹窗标题「今日速赚570淘金币」，正文「今日快速赚奖励已拿完」「记得明天再来」。
 # OCR 有时把正文拆成几段，所以用「奖励已拿完」这种不含数字的短片段做匹配。
@@ -194,6 +202,37 @@ def team_page_visible(items: Iterable[OcrItem]) -> bool:
 def coin_home_visible(items: Iterable[OcrItem]) -> bool:
     """当前屏是否是淘金币赛车首页（可以点「赚金币」进入任务面板）。"""
     return panel_visible(items, COIN_HOME_MARKERS)
+
+
+def taobao_home_visible(items: Iterable[OcrItem]) -> bool:
+    """当前屏是否是淘宝 App 首页（不是促销浮层，也不是淘金币页面）。"""
+    return panel_visible(items, TB_HOME_MARKERS)
+
+
+def coin_entry_point(items: Sequence[OcrItem]) -> OcrItem | None:
+    """在淘宝首页上定位「淘金币」入口文字块。"""
+    return find_text_by_keywords(items, COIN_ENTRY_KEYWORDS)
+
+
+def keyword_center(item: OcrItem, keyword: str) -> tuple[int, int] | None:
+    """按关键词在文字块内的字符占比，推算该关键词的中心坐标。
+
+    为什么不能直接点 item.center：OCR 会把首页同一排图标合并成一个文字块，
+    例如「领淘金币充值中心试用领取常买超市」整块中心落在「充值中心」上，
+    点下去就会进错页面。这里假设块内字符等宽，按关键词出现的字符下标折算。
+    """
+    text = item.text
+    word = normalize_text(keyword)
+    if not word or not text:
+        return None
+    index = text.find(word)
+    if index < 0:
+        return None
+    left = item.x + item.width * index / len(text)
+    right = item.x + item.width * (index + len(word)) / len(text)
+    x = int((left + right) / 2)
+    y = item.y + item.height // 2
+    return x, y
 
 
 def pick_task(

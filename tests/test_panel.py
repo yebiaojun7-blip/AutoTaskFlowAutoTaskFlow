@@ -342,6 +342,58 @@ class DailyDoneTest(unittest.TestCase):
         self.assertEqual(context.controller.keys, [])
 
 
+class CoinEntryTest(unittest.TestCase):
+    """首页那一排图标会被 OCR 合并成一个文字块，点击点必须按关键词折算。"""
+
+    MERGED = [text_item("领淘金币充值中心试用领取常买超市", 245, 443, 447, 28)]
+    PROMO = [
+        text_item("双11提前领好券", 85, 100, 225, 40),
+        text_item("苹果惊喜券至高领450元", 33, 259, 317, 39),
+    ]
+
+    def test_keyword_center_lands_on_the_keyword_not_the_block_center(self) -> None:
+        item = panel.parse_ocr_items(self.MERGED)[0]
+        point = panel.keyword_center(item, "淘金币")
+        self.assertIsNotNone(point)
+        # 整块中心是 (468, 457)，落在「充值中心」上，点它会进错页面。
+        self.assertEqual(item.center, (468, 457))
+        x, y = point
+        self.assertLess(x, 400)
+        self.assertEqual(y, 457)
+
+    def test_keyword_center_returns_none_when_absent(self) -> None:
+        item = panel.parse_ocr_items(self.MERGED)[0]
+        self.assertIsNone(panel.keyword_center(item, "赚金币"))
+
+    def test_home_entry_is_found_on_taobao_home(self) -> None:
+        items = panel.parse_ocr_items(self.MERGED + [text_item("搜索", 593, 168, 73, 44)])
+        self.assertTrue(panel.taobao_home_visible(items))
+        self.assertIsNotNone(panel.coin_entry_point(items))
+        # 促销浮层不是首页，不能被当成首页去点入口。
+        self.assertFalse(panel.taobao_home_visible(panel.parse_ocr_items(self.PROMO)))
+
+    def test_recover_clicks_keyword_position_on_home(self) -> None:
+        """停在淘宝首页时，应按关键词位置点「淘金币」进入面板。"""
+        home = self.MERGED + [text_item("搜索", 593, 168, 73, 44)]
+        context = FakeContext([home, PANEL_ROW, DONE_ONLY])
+        result = actions.open_coin_page(context, fast_config())
+
+        self.assertTrue(result)
+        self.assertTrue(context.controller.clicks)
+        x, y = context.controller.clicks[0]
+        self.assertLess(x, 400)
+        self.assertEqual(y, 457)
+
+    def test_recover_presses_back_on_promo_layer(self) -> None:
+        """促销浮层挡住首页时必须按返回关掉，而不是点击浮层内容。"""
+        context = FakeContext([self.PROMO, PANEL_ROW, DONE_ONLY])
+        result = actions.open_coin_page(context, fast_config())
+
+        self.assertTrue(result)
+        self.assertIn(4, context.controller.keys)
+        self.assertEqual(context.controller.clicks, [])
+
+
 class AppUserTest(unittest.TestCase):
     """应用分身跑在独立 Android 用户下（本机 999），必须按配置指定用户。"""
 

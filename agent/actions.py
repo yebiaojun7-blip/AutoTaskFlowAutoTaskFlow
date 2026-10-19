@@ -158,18 +158,23 @@ def start_app(context: Any, config: dict[str, Any]) -> bool:
     return True
 
 
-def _recover_to_panel(context: Any, config: dict[str, Any], *, tries: int = 4) -> bool:
+def _recover_to_panel(context: Any, config: dict[str, Any], *, tries: int = 6) -> bool:
     """把界面拉回淘金币任务面板。
 
-    只按返回键是回不去的，三种局面必须分开处理：
+    只按返回键是回不去的，四种局面必须分开处理：
       1. 已在任务面板 —— 直接返回；
       2. 停在双11 组队活动页 —— 这是广告页，没有任何日常任务，按返回退出；
       3. 停在淘金币赛车首页 —— 这里按返回会直接退出淘金币，
-         必须点左下角的「赚金币」才能重新打开任务面板。
+         必须点左下角的「赚金币」才能重新打开任务面板；
+      4. 停在淘宝首页 —— 点「领淘金币」图标进入；
+      5. 停在促销浮层（如「双11提前领好券」）—— 封面挡住了入口，按返回关掉。
     """
     for _ in range(tries):
         items = _scan(context)
         if panel.panel_visible(items):
+            return True
+        if panel.daily_done_visible(items):
+            LOGGER.info("今日任务已全部完成，无需回到任务面板")
             return True
 
         if panel.team_page_visible(items):
@@ -184,8 +189,35 @@ def _recover_to_panel(context: Any, config: dict[str, Any], *, tries: int = 4) -
                 _click_item(context, entry, delay=2.0)
                 continue
 
+        entry = panel.coin_entry_point(items)
+        if entry is not None:
+            # 首页那一排图标常被 OCR 合并成一个文字块（例如
+            # 「领淘金币充值中心试用领取常买超市」），块中心落在旁边的「充值中心」上，
+            # 直接点块中心会进错页面，所以按关键词在块内的字符位置折算。
+            clicked = False
+            for keyword in panel.COIN_ENTRY_KEYWORDS:
+                point = panel.keyword_center(entry, keyword)
+                if point is not None:
+                    LOGGER.info("在淘宝首页点击「%s」进入淘金币 %s", keyword, point)
+                    _click(context, point[0], point[1], delay=3.0)
+                    clicked = True
+                    break
+            if clicked:
+                continue
+
         _back(context)
+
     return panel.panel_visible(_scan(context))
+
+
+def open_coin_page(context: Any, config: dict[str, Any]) -> bool:
+    """从任意起始页面进入淘金币任务面板，供 Pipeline 入口节点调用。"""
+    if _recover_to_panel(context, config):
+        LOGGER.info("已进入淘金币任务面板")
+        return True
+    LOGGER.error("无法进入淘金币任务面板")
+    return False
+
 
 
 def run_daily_loop(context: Any, config: dict[str, Any], *, max_rounds: int = DEFAULT_MAX_ROUNDS) -> bool:
@@ -291,6 +323,18 @@ def register(agent_server: Any) -> None:
                 LOGGER.error("读取任务配置失败：%s", exc)
                 return False
             return start_app(context, config)
+
+    @agent_server.custom_action("taobao_open_coin_page")
+    class TaobaoOpenCoinPage(CustomAction):
+        """从当前页面进入淘金币任务面板。"""
+
+        def run(self, context: Context, argv: Any) -> bool:
+            try:
+                config = load_config()
+            except Exception as exc:  # noqa: BLE001 - 配置读不出来必须显式失败
+                LOGGER.error("读取任务配置失败：%s", exc)
+                return False
+            return open_coin_page(context, config)
 
     @agent_server.custom_action("taobao_daily_loop")
     class TaobaoDailyLoop(CustomAction):
