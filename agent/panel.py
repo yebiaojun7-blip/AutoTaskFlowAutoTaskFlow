@@ -274,6 +274,35 @@ def taobao_home_visible(items: Iterable[OcrItem]) -> bool:
     return panel_visible(items, TB_HOME_MARKERS)
 
 
+# 跳出淘宝时的系统「打开其他应用」确认框。
+# 真机实测（应用分身 tao 跳支付宝小程序）：
+#   标题「"淘宝(分身)"想要打开"支付宝"小程序」
+#   正文「始终允许打开」+ 按钮「取消」「打开」
+# 这个框盖在任务面板上方，面板文字仍然能被 OCR 认出来，所以不检测它的话
+# 主循环会以为还在面板上，反复点任务按钮、反复被这个框拦下。
+OPEN_APP_DIALOG_MARKERS = ("想要打开", "始终允许打开")
+OPEN_APP_DIALOG_CONFIRM = ("打开", "允许")
+
+
+def open_app_dialog_visible(items: Iterable[OcrItem]) -> bool:
+    """当前屏是否挡着「想要打开其他应用」的确认框。"""
+    return panel_visible(items, OPEN_APP_DIALOG_MARKERS, min_hits=1)
+
+
+def open_app_dialog_button(items: Iterable[OcrItem], words: Sequence[str]) -> OcrItem | None:
+    """在确认框上找指定按钮（「打开」/「取消」）。
+
+    只认完全相等的文字块：标题里也含「打开」（想要打开…），
+    用包含匹配会点到标题上，什么都不会发生。
+    """
+    wanted = {normalize_text(word) for word in words}
+    candidates = [item for item in items if normalize_text(item.text) in wanted]
+    if not candidates:
+        return None
+    # 同一行有多个候选时取最右边那个，符合确认框「取消 | 打开」的排布。
+    return max(candidates, key=lambda item: item.x)
+
+
 def coin_entry_point(items: Sequence[OcrItem]) -> OcrItem | None:
     """在淘宝首页上定位「淘金币」入口文字块。"""
     return find_text_by_keywords(items, COIN_ENTRY_KEYWORDS)

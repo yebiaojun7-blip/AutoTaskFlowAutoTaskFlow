@@ -21,6 +21,13 @@ class AgentBehaviorTest(unittest.TestCase):
         decision = classify_task("无法识别的任务", self.config)
         self.assertEqual(decision.kind, "unknown")
 
+    def test_alipay_tasks_are_still_executed_as_jumps(self) -> None:
+        """跳支付宝的任务要做，不能因为弹框就放弃。"""
+        for text in ("去蚂蚁庄园逛逛哟(0/1)", "去蚂蚁森林收能量(0/1)"):
+            with self.subTest(text=text):
+                decision = classify_task(text, self.config)
+                self.assertEqual(decision.kind, "jump")
+
     def test_safety_verification_stops_before_click(self) -> None:
         controller = SimulationController(self.logger)
         result = run_tasks(

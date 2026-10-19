@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import Any, Callable
 
@@ -18,6 +19,10 @@ from agent import panel
 from agent.custom import app_user_id, load_config, start_app_command
 
 LOGGER = logging.getLogger("autotaskflow")
+
+# 从 dumpsys 里取前台包名：
+#   topResumedActivity=ActivityRecord{263017643 u999 com.taobao.taobao/...}
+_FOREGROUND_RE = re.compile(r"topResumedActivity=ActivityRecord\{[^}]*?\s((?:[a-zA-Z0-9_]+\.)+[a-zA-Z0-9_]+)/")
 
 # 单次运行最多处理多少个任务，防止页面异常时无限循环。
 DEFAULT_MAX_ROUNDS = 20
@@ -121,6 +126,14 @@ def _run_task(context: Any, pick: panel.PanelPick, config: dict[str, Any], butto
         _run_search(context, keyword, config, _screencap(context))
         return
 
+    # 跳转类任务（蚂蚁庄园 / 蚂蚁森林 / 支付宝农场）点下去会弹「想要打开支付宝小程序」，
+    # 要真的点「打开」进去做，不能取消：取消就是放弃任务。
+    # 这个框盖在面板上方且面板文字仍能被识别，不处理就会永远卡在这里。
+    if kind == "jump":
+        items = _scan(context)
+        if panel.open_app_dialog_visible(items) and _confirm_open_app_dialog(context, items):
+            LOGGER.info("已确认打开外部小程序，进去做任务「%s」", pick.item.text)
+
     duration = panel.action_duration(kind, config)
     LOGGER.info("任务类型 %s，停留 %.1f 秒", kind, duration)
     _sleep(duration)
@@ -158,19 +171,92 @@ def start_app(context: Any, config: dict[str, Any]) -> bool:
     return True
 
 
+def _foreground_package(context: Any) -> str:
+    """查当前前台应用包名，取不到就返回空串。
+
+    任务里有几条要跳去支付宝（蚂蚁庄园 / 蚂蚁森林 / 支付宝农场）。支付宝会弹一个
+    提示框拦下这次跳转，淘宝就被压到后台，之后无论按多少次返回都回不到任务面板。
+    所以要能问出「现在最前面的是谁」，才能决定是不是该把淘宝重新拉到前台。
+    """
+    try:
+        job = _controller(context).post_shell(
+            "dumpsys activity activities | grep -m 1 topResumedActivity"
+        )
+        job.wait()
+        output = str(job.get() or "")
+    except Exception:  # noqa: BLE001 - 查不到就当作不知道，不影响主流程
+        return ""
+    match = _FOREGROUND_RE.search(output)
+    return match.group(1) if match else ""
+
+
+def _ensure_taobao_foreground(context: Any, config: dict[str, Any]) -> bool:
+    """不是淘宝在前台时，把淘宝拉回来。返回是否真的做了恢复。"""
+    app = config.get("app") or {}
+    package = str(app.get("package") or "com.taobao.taobao")
+    current = _foreground_package(context)
+    if not current or current == package:
+        return False
+
+    LOGGER.info("前台应用是 %s，不是淘宝，准备把淘宝拉回前台", current)
+    if start_app(context, config):
+        _sleep(2.0)
+    return True
+
+
+def _confirm_open_app_dialog(context: Any, items: list[panel.OcrItem], *, tries: int = 3) -> bool:
+    """碰到「想要打开其他应用」确认框就点「打开」，真的跳进去做任务。
+
+    跳支付宝的任务（蚂蚁庄园 / 蚂蚁森林 / 支付宝农场）点击后会出这个框。
+    框盖在面板上方但面板文字仍能被 OCR 认出来，所以必须主动识别并处理，
+    否则每轮都会重复点同一个任务、重复被同一个框拦住。
+
+    这里选「打开」而不是「取消」：目标任务就是要进支付宝才能完成，
+    取消等于放弃。进去做完再由 _recover_to_panel 把淘宝拉回来。
+
+    items 传入调用方已经拿到的识别结果，避免为了判断弹框再多截一次图。
+    返回是否真的点过确认框。
+    """
+    confirmed = False
+    for _ in range(tries):
+        if not panel.open_app_dialog_visible(items):
+            break
+        button = panel.open_app_dialog_button(items, panel.OPEN_APP_DIALOG_CONFIRM)
+        if button is None:
+            break
+        LOGGER.info("确认框点「%s」进入外部小程序", button.text)
+        _click_item(context, button, delay=1.5)
+        confirmed = True
+        items = _scan(context)
+    return confirmed
+
+
 def _recover_to_panel(context: Any, config: dict[str, Any], *, tries: int = 6) -> bool:
     """把界面拉回淘金币任务面板。
 
-    只按返回键是回不去的，四种局面必须分开处理：
+    只按返回键是回不去的，几种局面必须分开处理：
       1. 已在任务面板 —— 直接返回；
       2. 停在双11 组队活动页 —— 这是广告页，没有任何日常任务，按返回退出；
       3. 停在淘金币赛车首页 —— 这里按返回会直接退出淘金币，
          必须点左下角的「赚金币」才能重新打开任务面板；
       4. 停在淘宝首页 —— 点「领淘金币」图标进入；
-      5. 停在促销浮层（如「双11提前领好券」）—— 封面挡住了入口，按返回关掉。
+      5. 停在促销浮层（如「双11提前领好券」）—— 封面挡住了入口，按返回关掉；
+      6. 挡住「想要打开其他应用」确认框 —— 直接点「打开」继续这次跳转；
+      7. 已经跳到别的应用 —— 重新打开淘宝。
     """
+    if _ensure_taobao_foreground(context, config):
+        LOGGER.info("已重新打开淘宝，继续找任务面板")
+
     for _ in range(tries):
         items = _scan(context)
+
+        # 确认框必须先于「在面板上」判断：它盖在面板上方，但面板文字依然能被识别，
+        # 先判面板就会以为一切正常，然后不断点在弹框上。
+        if panel.open_app_dialog_visible(items):
+            _confirm_open_app_dialog(context, items)
+            _back(context)
+            continue
+
         if panel.task_panel_visible(items):
             return True
         if panel.daily_done_visible(items):

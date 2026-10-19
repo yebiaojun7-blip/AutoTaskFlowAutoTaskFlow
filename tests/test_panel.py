@@ -37,6 +37,7 @@ class FakeController:
         self.swipes: list[tuple[int, int, int, int]] = []
         self.inputs: list[str] = []
         self.shells: list[str] = []
+        self.foreground = "com.taobao.taobao"
         self.resolution = list(size)
 
     def post_screencap(self) -> FakeJob:
@@ -62,6 +63,11 @@ class FakeController:
 
     def post_shell(self, cmd, timeout=20000) -> FakeJob:  # noqa: ANN001
         self.shells.append(str(cmd))
+        if "topResumedActivity" in str(cmd):
+            return FakeJob(
+                f"  topResumedActivity=ActivityRecord{{263017643 u999 "
+                f"{self.foreground}/com.taobao.tao.welcome.Welcome t11518}}"
+            )
         return FakeJob("")
 
 
@@ -350,6 +356,86 @@ class RecoverTest(unittest.TestCase):
         self.assertIn(4, context.controller.keys)
         self.assertEqual(context.controller.clicks, [])
 
+    def test_alipay_dialog_is_closed_and_taobao_reopened(self) -> None:
+        """真跑到支付宝去了就把淘宝重新打开。"""
+        context = FakeContext([PANEL_ROW, PANEL_ROW, DONE_ONLY])
+        context.controller.foreground = "com.eg.android.AlipayGphone"
+
+        self.assertTrue(actions._recover_to_panel(context, fast_config()))
+
+        self.assertTrue(
+            any("am start" in shell and "taobao" in shell for shell in context.controller.shells)
+        )
+
+    def test_staying_in_taobao_does_not_restart_it(self) -> None:
+        """还在淘宝里时不能反复启动应用，那样每轮都要从首页重找入口。"""
+        context = FakeContext([PANEL_ROW, DONE_ONLY])
+
+        self.assertTrue(actions._recover_to_panel(context, fast_config()))
+        self.assertFalse(any("am start" in shell for shell in context.controller.shells))
+        self.assertEqual(context.controller.keys, [])
+
+
+# 真机截图（应用分身 → 支付宝小程序）：
+#   “淘宝(分身)”想要打开“支付宝”小程序 / □始终允许打开 / 取消 | 打开
+OPEN_APP_DIALOG = [
+    text_item("“淘宝(分身)”想要打开“支付宝”小程序", 62, 828, 596, 96),
+    text_item("始终允许打开", 90, 900, 200, 40),
+    text_item("取消", 168, 960, 100, 50),
+    text_item("打开", 528, 960, 100, 50),
+]
+
+# 弹框盖在面板上方时，面板文字依然能被 OCR 认出来。
+PANEL_WITH_DIALOG = PANEL_ROW + OPEN_APP_DIALOG
+
+
+class OpenAppDialogTest(unittest.TestCase):
+    def test_dialog_is_recognized(self) -> None:
+        items = panel.parse_ocr_items(OPEN_APP_DIALOG)
+        self.assertTrue(panel.open_app_dialog_visible(items))
+        # 面板文字也还在，所以不能只靠「在面板上」判断是否卡住。
+        self.assertTrue(panel.task_panel_visible(panel.parse_ocr_items(PANEL_WITH_DIALOG)))
+
+    def test_confirm_button_is_not_the_title(self) -> None:
+        """标题里也含「打开」，按钮必须取精确匹配的「打开」。"""
+        items = panel.parse_ocr_items(OPEN_APP_DIALOG)
+        button = panel.open_app_dialog_button(items, panel.OPEN_APP_DIALOG_CONFIRM)
+        self.assertIsNotNone(button)
+        self.assertEqual(button.text, "打开")
+
+    def test_dialog_is_confirmed_by_open(self) -> None:
+        """跳转任务要真的进去做，弹框上要选「打开」而不是「取消」。"""
+        context = FakeContext([PANEL_WITH_DIALOG, PANEL_ROW, DONE_ONLY])
+        self.assertTrue(actions._recover_to_panel(context, fast_config()))
+
+        self.assertIn((578, 985), context.controller.clicks)
+        self.assertNotIn((218, 985), context.controller.clicks)
+
+    def test_loop_keeps_going_after_dialog(self) -> None:
+        """弹框确认后主循环要继续做别的任务，不能停在原地。"""
+        context = FakeContext(
+            [PANEL_ROW, PANEL_WITH_DIALOG, PANEL_ROW, PANEL_ROW, DONE_ONLY]
+        )
+        result = actions.run_daily_loop(context, fast_config(), max_rounds=3)
+
+        self.assertTrue(result)
+        self.assertIn((578, 985), context.controller.clicks)
+
+    def test_jump_task_enters_the_app_before_returning(self) -> None:
+        """跳转类任务：确认弹框 → 停留 → 返回，而不是直接放弃。"""
+        jump_row = [
+            text_item("赚金币抵钱", 100, 150, 300, 48),
+            text_item("今日累计奖励", 100, 220, 240, 40),
+            text_item("去蚂蚁庄园逛逛哟(0/1)", 100, 300),
+            text_item("去逛逛", 900, 300, 120, 40),
+        ]
+        context = FakeContext([jump_row, PANEL_WITH_DIALOG, jump_row, DONE_ONLY])
+        actions.run_daily_loop(context, fast_config(), max_rounds=2)
+
+        # 打开了外部小程序，做完还要退回淘宝。
+        self.assertIn((578, 985), context.controller.clicks)
+        self.assertIn(4, context.controller.keys)
+
 
 DAILY_DONE_PAGE = [
     text_item("今日速赚570淘金币", 32, 193, 371, 39),
@@ -571,7 +657,8 @@ class ProgressTest(unittest.TestCase):
             return [
                 text_item("赚金币抵钱", 100, 150, 300, 48),
                 text_item("今日累计奖励", 100, 220, 240, 40),
-                text_item(f"去蚂蚁庄园逛逛哟({spelling}/1)", 100, 300),
+                text_item(f"浏览商品({spelling}/5)", 100, 300),
+                text_item("去完成", 900, 300, 120, 40),
             ]
 
         context = FakeContext([stuck("0"), stuck("O"), stuck("0"), stuck("O")])
