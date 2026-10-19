@@ -376,7 +376,7 @@ class RecoverTest(unittest.TestCase):
         self.assertEqual(context.controller.keys, [])
 
 
-# 真机截图（应用分身 → 支付宝小程序）：
+# 真机截图（应用分身 → 支付宝小程序）：横向排版，带「打开」按钮
 #   “淘宝(分身)”想要打开“支付宝”小程序 / □始终允许打开 / 取消 | 打开
 OPEN_APP_DIALOG = [
     text_item("“淘宝(分身)”想要打开“支付宝”小程序", 62, 828, 596, 96),
@@ -385,8 +385,32 @@ OPEN_APP_DIALOG = [
     text_item("打开", 528, 960, 100, 50),
 ]
 
+# 真机截图（一加 Ace 3，淘宝分身 → 闲鱼）：纵向排版，没有「打开」按钮
+#   “淘宝(分身)”想要打开“闲鱼” / 30天内允许 / 仅本次允许 / 取消
+OPEN_APP_DIALOG_VERTICAL = [
+    text_item("“淘宝(分身)”想要打开“闲鱼”", 136, 1077, 447, 38),
+    text_item("30天内允许", 268, 1196, 180, 43),
+    text_item("仅本次允许", 276, 1303, 167, 40),
+    text_item("取消", 321, 1405, 74, 43),
+]
+
 # 弹框盖在面板上方时，面板文字依然能被 OCR 认出来。
 PANEL_WITH_DIALOG = PANEL_ROW + OPEN_APP_DIALOG
+PANEL_WITH_VERTICAL_DIALOG = PANEL_ROW + OPEN_APP_DIALOG_VERTICAL
+
+
+# 真机截图（淘宝站外跳转提示，跳头条）：
+#   提示 / 下个页面不受我们控制哦，使用时请注意安全 https://z.toutiao.com
+#   取消 | 浏览器打开
+EXTERNAL_JUMP_TIP = [
+    text_item("提示", 90, 689, 93, 51),
+    text_item("下个页面不受我们控制哦，使用时请", 93, 759, 517, 39),
+    text_item("注意安全https://z.toutiao.com", 94, 800, 428, 36),
+    text_item("取消", 360, 897, 65, 38),
+    text_item("浏览器打开", 475, 895, 148, 38),
+]
+
+PANEL_WITH_EXTERNAL_TIP = PANEL_ROW + EXTERNAL_JUMP_TIP
 
 
 class OpenAppDialogTest(unittest.TestCase):
@@ -435,7 +459,65 @@ class OpenAppDialogTest(unittest.TestCase):
         # 打开了外部小程序，做完还要退回淘宝。
         self.assertIn((578, 985), context.controller.clicks)
         self.assertIn(4, context.controller.keys)
+    def test_vertical_dialog_without_open_button_is_handled(self) -> None:
+        """纵向弹框没有「打开」，只能点「仅本次允许」——否则永远卡在这个框上。"""
+        items = panel.parse_ocr_items(OPEN_APP_DIALOG_VERTICAL)
+        self.assertTrue(panel.open_app_dialog_visible(items))
 
+        button = panel.open_app_dialog_button(items, panel.OPEN_APP_DIALOG_CONFIRM)
+        self.assertIsNotNone(button)
+        self.assertEqual(button.text, "仅本次允许")
+
+    def test_vertical_dialog_is_clicked_through_in_loop(self) -> None:
+        """纵向弹框也要能点过去，而不是反复点任务按钮。"""
+        jump_row = [
+            text_item("赚金币抵钱", 100, 150, 300, 48),
+            text_item("今日累计奖励", 100, 220, 240, 40),
+            text_item("点击去逛+20", 100, 300),
+            text_item("去逛逛", 900, 300, 120, 40),
+        ]
+        context = FakeContext(
+            [jump_row, PANEL_WITH_VERTICAL_DIALOG, jump_row, DONE_ONLY]
+        )
+        actions.run_daily_loop(context, fast_config(), max_rounds=2)
+
+        # 「仅本次允许」块 [276,1303,167,40] 的中心
+        self.assertIn((359, 1323), context.controller.clicks)
+        # 不能去点「取消」[321,1405,74,43]
+        self.assertNotIn((358, 1426), context.controller.clicks)
+
+    def test_shortest_permission_is_preferred(self) -> None:
+        """同时存在多个选项时选限时最短的，别给分身长期授权。"""
+        items = panel.parse_ocr_items(
+            OPEN_APP_DIALOG_VERTICAL
+            + [text_item("始终允许打开", 268, 1250, 180, 43)]
+        )
+        button = panel.open_app_dialog_button(items, panel.OPEN_APP_DIALOG_CONFIRM)
+        self.assertIsNotNone(button)
+        self.assertEqual(button.text, "仅本次允许")
+
+    def test_external_jump_tip_is_recognized(self) -> None:
+        """站外跳转提示也要当成拦路弹框：按返回键关不掉它。"""
+        items = panel.parse_ocr_items(EXTERNAL_JUMP_TIP)
+        self.assertTrue(panel.open_app_dialog_visible(items))
+        self.assertFalse(panel.task_panel_visible(items))
+
+    def test_external_jump_tip_is_clicked_through(self) -> None:
+        """站外提示要点「浏览器打开」继续，而不是卡住反复按返回。"""
+        jump_row = [
+            text_item("赚金币抵钱", 100, 150, 300, 48),
+            text_item("今日累计奖励", 100, 220, 240, 40),
+            text_item("点击去逛+40", 100, 300),
+            text_item("去逛逛", 900, 300, 120, 40),
+        ]
+        context = FakeContext(
+            [jump_row, PANEL_WITH_EXTERNAL_TIP, jump_row, DONE_ONLY]
+        )
+        actions.run_daily_loop(context, fast_config(), max_rounds=2)
+
+        # 「浏览器打开」块 [475,895,148,38] 的中心
+        self.assertIn((549, 914), context.controller.clicks)
+        self.assertNotIn((392, 916), context.controller.clicks)
 
 DAILY_DONE_PAGE = [
     text_item("今日速赚570淘金币", 32, 193, 371, 39),

@@ -274,14 +274,40 @@ def taobao_home_visible(items: Iterable[OcrItem]) -> bool:
     return panel_visible(items, TB_HOME_MARKERS)
 
 
-# 跳出淘宝时的系统「打开其他应用」确认框。
-# 真机实测（应用分身 tao 跳支付宝小程序）：
-#   标题「"淘宝(分身)"想要打开"支付宝"小程序」
-#   正文「始终允许打开」+ 按钮「取消」「打开」
-# 这个框盖在任务面板上方，面板文字仍然能被 OCR 认出来，所以不检测它的话
-# 主循环会以为还在面板上，反复点任务按钮、反复被这个框拦下。
-OPEN_APP_DIALOG_MARKERS = ("想要打开", "始终允许打开")
-OPEN_APP_DIALOG_CONFIRM = ("打开", "允许")
+# 跳出淘宝时的确认框。真机实测有三种：
+#
+#   1. 系统「打开其他应用」横向排版（跳支付宝小程序）：
+#        “淘宝(分身)”想要打开“支付宝”小程序 / □始终允许打开 / 取消 | 打开
+#   2. 系统「打开其他应用」纵向排版（一加 Ace 3，跳闲鱼）：
+#        “淘宝(分身)”想要打开“闲鱼” / 30天内允许 / 仅本次允许 / 取消
+#      这种**没有「打开」按钮**，只按「打开」找会找不到按钮然后直接放弃，
+#      于是永远停在这个框上。
+#   3. 淘宝自己的站外跳转提示（跳头条等外部页）：
+#        提示 / 下个页面不受我们控制哦，使用时请注意安全 https://z.toutiao.com
+#        取消 | 浏览器打开
+#      这种框按返回键关不掉，只能点按钮。
+#
+# 这些框都盖在任务面板上方，面板文字仍然能被 OCR 认出来，所以不检测它们的话
+# 主循环会以为还在面板上，反复点任务按钮、反复被同一个框拦下。
+OPEN_APP_DIALOG_MARKERS = (
+    "想要打开",
+    "始终允许打开",
+    "天内允许",
+    "仅本次允许",
+    "不受我们控制",
+    "浏览器打开",
+)
+
+# 按优先级排列：优先「只有本次」，避免给分身长期授权；
+# 「浏览器打开」是站外跳转提示上的确认按钮。
+OPEN_APP_DIALOG_CONFIRM = (
+    "打开",
+    "允许",
+    "仅本次允许",
+    "30天内允许",
+    "始终允许打开",
+    "浏览器打开",
+)
 
 
 def open_app_dialog_visible(items: Iterable[OcrItem]) -> bool:
@@ -290,17 +316,19 @@ def open_app_dialog_visible(items: Iterable[OcrItem]) -> bool:
 
 
 def open_app_dialog_button(items: Iterable[OcrItem], words: Sequence[str]) -> OcrItem | None:
-    """在确认框上找指定按钮（「打开」/「取消」）。
+    """在确认框上找确认按钮。
 
     只认完全相等的文字块：标题里也含「打开」（想要打开…），
     用包含匹配会点到标题上，什么都不会发生。
+
+    words 按优先级排列 —— 纵向排版没有「打开」，只能退到「仅本次允许」。
     """
-    wanted = {normalize_text(word) for word in words}
-    candidates = [item for item in items if normalize_text(item.text) in wanted]
-    if not candidates:
-        return None
-    # 同一行有多个候选时取最右边那个，符合确认框「取消 | 打开」的排布。
-    return max(candidates, key=lambda item: item.x)
+    by_text = {normalize_text(item.text): item for item in items}
+    for word in words:
+        item = by_text.get(normalize_text(word))
+        if item is not None:
+            return item
+    return None
 
 
 def coin_entry_point(items: Sequence[OcrItem]) -> OcrItem | None:
