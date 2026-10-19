@@ -231,7 +231,6 @@ def run_daily_loop(context: Any, config: dict[str, Any], *, max_rounds: int = DE
     max_attempts = int(config.get("timing", {}).get("max_attempts_per_task", 2))
     empty_rounds = 0
     completed = 0
-    attempt = 0
     # 同一个任务该执行几次就够。淘宝的任务面板会把没做完的任务一直摆在原位，
     # 若每次扫描都挑中同一个（例如「点击去逛+30」），停留再久也不会推进，
     # 就会把轮次全部耗在它身上。这里按任务名记执行次数，超过上限就放弃。
@@ -282,7 +281,7 @@ def run_daily_loop(context: Any, config: dict[str, Any], *, max_rounds: int = DE
                     return True
                 continue
 
-        name = panel.normalize_text(pick.item.text)
+        name = panel.task_key(pick.item.text)
         button = panel.find_action_button(items, pick.item) or pick.item
         LOGGER.info(
             "第 %d 轮：执行「%s」（%s），按钮「%s」",
@@ -294,7 +293,6 @@ def run_daily_loop(context: Any, config: dict[str, Any], *, max_rounds: int = DE
         _run_task(context, pick, config, button)
         completed += 1
         empty_rounds = 0
-        attempt += 1
 
         if not _recover_to_panel(context, config):
             LOGGER.warning("任务后未能回到任务面板")
@@ -328,7 +326,7 @@ def _find_progress(context: Any, name: str) -> tuple[int, int] | None:
     """在任务面板上找到同名任务，读它的进度。"""
     key = name[:6]
     for item in _scan(context):
-        if panel.normalize_text(item.text).startswith(key):
+        if panel.task_key(item.text).startswith(key):
             progress = panel.task_progress(item.text)
             if progress is not None:
                 return progress

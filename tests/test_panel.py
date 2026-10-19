@@ -555,6 +555,31 @@ class ProgressTest(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIsNone(panel.task_progress(text))
 
+    def test_ocr_confused_letter_is_read_as_digit(self) -> None:
+        """OCR 把 (0/1) 认成 (O/1) 时，同一个任务不能被当成两个。"""
+        self.assertEqual(panel.task_progress("去蚂蚁庄园逛逛哟(O/1)"), (0, 1))
+        self.assertEqual(panel.task_progress("去蚂蚁庄园逛逛哟(l/1)"), (1, 1))
+        self.assertEqual(
+            panel.task_key("去蚂蚁庄园逛逛哟(O/1)"),
+            panel.task_key("去蚂蚁庄园逛逛哟(0/1)"),
+        )
+
+    def test_confused_letter_does_not_double_run_the_same_task(self) -> None:
+        """同一任务名在两种 OCR 结果下交替出现，只应计一次。"""
+
+        def stuck(spelling: str) -> list[dict]:
+            return [
+                text_item("赚金币抵钱", 100, 150, 300, 48),
+                text_item("今日累计奖励", 100, 220, 240, 40),
+                text_item(f"去蚂蚁庄园逛逛哟({spelling}/1)", 100, 300),
+            ]
+
+        context = FakeContext([stuck("0"), stuck("O"), stuck("0"), stuck("O")])
+        result = actions.run_daily_loop(context, fast_config(), max_rounds=10)
+
+        self.assertTrue(result)
+        self.assertEqual(len(context.controller.clicks), 2)
+
     def test_stalled_task_is_not_retried_forever(self) -> None:
         """进度一直 0/5 时必须放弃该任务，否则会无限重试同一个。"""
         stuck = [

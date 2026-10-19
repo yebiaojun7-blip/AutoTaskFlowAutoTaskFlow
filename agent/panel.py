@@ -93,6 +93,18 @@ def normalize_text(text: Any) -> str:
 
 _PROGRESS_RE = re.compile(r"[(（]\s*(\d+)\s*/\s*(\d+)\s*[)）]")
 
+# OCR 常把数字认成形近字母：「去蚂蚁庄园逛逛哟(0/1)」会被识别成 (O/1)，
+# 于是同一个任务在日志和去重里被当成两个不同任务，白白多跑两轮。
+_SHAPE_MAP = str.maketrans({"O": "0", "o": "0", "I": "1", "l": "1", "|": "1"})
+
+
+def task_key(text: str) -> str:
+    """任务名比较用的键：把 OCR 形近字母并入数字。
+
+    只用于比较与进度解析，不用于显示——界面上该显示什么还是显示什么。
+    """
+    return normalize_text(text).translate(_SHAPE_MAP)
+
 
 def task_progress(text: str) -> tuple[int, int] | None:
     """从任务文字里取出进度，例如「拍立淘逛感兴趣的宝贝(3/5)」→ (3, 5)。
@@ -100,7 +112,7 @@ def task_progress(text: str) -> tuple[int, int] | None:
     淘宝的任务进度直接写在任务名里。拿到它才能判断一次点击到底有没有生效：
     停留时间不够时进度不会增加，任务会一直停在 (0/5)，主循环只看轮次是发现不了的。
     """
-    match = _PROGRESS_RE.search(normalize_text(text))
+    match = _PROGRESS_RE.search(task_key(text))
     if not match:
         return None
     return int(match.group(1)), int(match.group(2))
@@ -305,9 +317,9 @@ def pick_task(
     allowed = tuple(kinds) if kinds else EXECUTABLE_KINDS
     skipped: list[str] = []
     for item in items:
-        text = normalize_text(item.text)
+        text = task_key(item.text)
         if text in exclude:
-            skipped.append(f"{text}(已放弃)")
+            skipped.append(f"{item.text}(已放弃)")
             continue
         decision = classify_task(item.text, config)
         if decision.kind in allowed:
