@@ -1,0 +1,64 @@
+# 打包成手机 APK 的配方（MaaFwApp 用）。
+#
+# 这是**样例**：真正用的时候拷一份到仓库外面，改掉下面的绝对路径，
+# 再让 MaaFwApp 的构建读到它——
+#   在 MaaFwApp 的 local.properties 里写  pi.profile=<这份文件的绝对路径>
+#   或设环境变量  PI_PROFILE=<同上>
+# 字段语义见 MaaFwApp 的 build-logic/BuildProfile.kt。
+#
+# 构建流程见 Readme「在手机上运行」。
+
+# 含 interface.json 的那一层（本仓库根目录）
+assets: d:/ProgramData/AutoTaskFlow
+
+# 进包白名单。**写了就是整体替换内置默认值**，所以本项目用到的目录要全列出来：
+#   assets/**  资源包（pipeline JSON + OCR 模型）
+#   agent/**   Agent 源码，运行时的 cwd 是资源解包根，入口就是 agent/main.py
+#   config/**  任务名单，agent 运行时按相对路径读它
+include:
+  - interface.json
+  - assets/**
+  - agent/**
+  - config/**
+  - LICENSE
+
+# 压在 include 之上，挖掉开发期用不上的东西
+exclude:
+  - debug/**
+  - tests/**
+  - tools/**
+  - "**/__pycache__/**"
+
+# 整段可省略＝不带 Agent 运行时；本项目的主循环全部在 Agent 里，必须带
+agent:
+  # 由 MaaFwApp 的 build_agent_bundle.py 生成的目录，结构是 <abi>/bundle/{bin,prefix,site-packages}
+  sourceDir: d:/ProgramData/AutoTaskFlow/.maafw/agent-dist
+  abi: [arm64-v8a]
+
+  # 条数必须与 interface.json 的 agent[] 一致（本项目是 1 条）
+  # 实际命令 = executable + args + identifier，PI 的 child_exec / child_args 不参与
+  runtimes:
+    - location: bundle
+      executable: bin/python3
+      name: autotaskflow-agent
+      args: [-u, agent/main.py]
+      env:
+        PYTHONHOME: "{bundle}/prefix"
+        PYTHONPATH: "{bundle}/site-packages/pure.zip:{bundle}/site-packages"
+        LD_LIBRARY_PATH: "{bundle}/prefix/lib:{nativeLibs}"
+        # 手机上 maa 的原生库装在 APK 的 nativeLibraryDir 里，不是 wheel 的 bin/
+        MAAFW_BINARY_PATH: "{nativeLibs}"
+
+# 导出日志时一并带上 Agent 写在资源解包根下的日志
+logs:
+  include:
+    - debug/**/*.log
+
+# 前台模式：直接操作当前屏幕（后台虚拟屏模式下淘宝的淘金币页表现不同，未验证过）
+display:
+  foreground: true
+
+app:
+  # 拼成 com.aliothmoon.maafw.autotaskflow
+  id: autotaskflow
+  label: 淘宝淘金币

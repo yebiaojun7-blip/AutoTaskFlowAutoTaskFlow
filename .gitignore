@@ -9,3 +9,8 @@ assets/resource/model/ocr/*
 !assets/resource/model/ocr/.gitkeep
 # 临时调试截图
 t*.png
+# 打包成 APK 时的中间产物（MaaFwApp 的 build_agent_bundle.py 输出）
+.maafw/
+# 个人打包配方：含本机绝对路径，不进仓库；样例见 pi-profile.sample.yaml
+pi-profile.yaml
+

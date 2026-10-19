@@ -1,0 +1,10 @@
+# Agent 侧依赖。
+#
+# 桌面上直连（tools/device_runner.py）只需要 MaaFw 这一个包，它自带
+# Framework / Toolkit / AgentServer 动态库。
+#
+# 打包进手机 APK 时这份清单会被 MaaFwApp 的 build_agent_bundle.py 过滤：
+# 它用的 CPython 内核（MaaAgentCoreAndroid）里已经带了 maa 包，所以这里
+# 写的版本会被丢弃，手机上实际用的是内核自带的那个版本。除 maa 之外本项目
+# 只用标准库，因此这里不需要再加别的依赖。
+MaaFw==5.14.3

@@ -32,7 +32,9 @@ agent/panel.py                    →  纯逻辑（解析/排序/挑选），无
 
 ```text
 .
-├── interface.json                  # ProjectInterface v2 配置
+├── interface.json                  # ProjectInterface v2 配置（任务 + 配置项）
+├── requirements.txt                # Agent 侧依赖（MaaFw）
+├── pi-profile.sample.yaml          # 打包成手机 APK 的配方样例
 ├── assets/resource/pipeline/
 │   ├── entry.json                  # 启动淘宝 → 进入淘金币 → 等面板
 │   ├── scan.json                   # OCR 节点定义 + 主循环挂载点
@@ -44,9 +46,9 @@ agent/panel.py                    →  纯逻辑（解析/排序/挑选），无
 │   ├── panel.py                    # OCR 解析与任务挑选（纯逻辑）
 │   ├── custom.py                   # 名单加载与任务分类
 │   └── runner.py                   # 无设备的本地模拟调度器
-├── config/tasks.json               # 黑名单 / 任务名单 / 时序参数 / 目标应用与用户
+├── config/tasks.json               # 黑名单 / 任务名单 / 时序参数 / 目标应用与 用户
 ├── tools/validate_project.py       # 离线校验（PI v2 + 协议 + 引用闭合）
-└── tests/                          # 69 项单元测试
+└── tests/                          # 104 项单元测试
 ```
 
 ---
@@ -227,6 +229,59 @@ python -m tools.device_runner --user 999
 
 ---
 
+## 在手机上运行（不接电脑）
+
+手机自己跑，需要两样东西：**提权通道**（Shizuku 或 root，用来截屏和点击）和**一个把本项目打进包里的壳**。壳用 [MaaFwApp](https://github.com/Aliothmoon/MaaFwApp)（AGPL-3.0，MaaFramework 的 Android 通用 GUI）：MaaFramework 跑在 Shizuku 拉起的特权进程里，走本机 native controller，不经过 adb。
+
+MaaFwApp **不发布现成 APK**，要自己出包，一次性的活：
+
+```powershell
+# 前置：JDK 17（不是 21）、Android SDK、Python 3
+git clone https://github.com/Aliothmoon/MaaFwApp.git
+cd MaaFwApp
+python scripts/setup_maa_framework.py
+
+# 1) 先把 Agent 打成 Android 能跑的运行时（CPython + maa 内核 + 本项目依赖）
+python scripts/build_agent_bundle.py `
+  --out d:/ProgramData/AutoTaskFlow/.maafw/agent-dist `
+  --requirements d:/ProgramData/AutoTaskFlow/requirements.txt --no-deps
+
+# 2) 拷一份配方改成自己的绝对路径，再让构建读到它
+copy pi-profile.sample.yaml pi-profile.yaml   # 在仓库外，改 assets / agent.sourceDir
+$env:PI_PROFILE = "d:/path/to/pi-profile.yaml"
+
+# 3) 出包
+.\gradlew.bat :app:assembleRelease
+```
+
+装好后：给通知和电池白名单权限 → 在应用里选 Shizuku（或 root）并授权 → 选服务器 → 勾任务 → 开跑。
+
+### 手机上的配置界面
+
+`interface.json` 里声明的东西就是手机上能改的东西。当前声明了：
+
+| 位置 | 内容 | 说明 |
+| --- | --- | --- |
+| 任务列表 | 淘宝淘金币日常任务（默认勾选） | 以后加任务就是往 `task` 里再加一条 |
+| 该任务的配置项 | **运行账号**：主账号（user 0）/ 应用分身（user 999） | 对应 `am start --user`，选错就操作不到目标那份淘宝 |
+
+MaaFwApp 支持保存**多份互相独立的运行配置**、同一任务重复添加、定时任务绑定到指定配置，所以「主账号跑一次、分身跑一次」不需要改文件，开两份配置即可。
+
+要加新任务（例如双11金币获取），在 `interface.json` 的 `task` 数组里追加一条 `{name, label, entry}`，`entry` 指向该任务的 Pipeline 入口节点，`default_check: false` 让它默认不勾选。配置项写在 `option` 里、由任务的 `option` 数组引用，用法见 [PI V2 协议](https://github.com/MaaXYZ/MaaFramework/blob/main/docs/zh_cn/3.3-ProjectInterfaceV2%E5%8D%8F%E8%AE%AE.md)。
+
+### 手机端与电脑端的差别
+
+| | 电脑（`tools/device_runner.py`，adb） | 手机（MaaFwApp，Shizuku） |
+| --- | --- | --- |
+| 截屏 / 点击 | minicap / maatouch | native controller |
+| 执行 shell | 可以（`am start --user`、`pm list packages`） | **不可以**，控制器没实现 shell |
+| 启动应用 | `am start --user <ID>` | 框架 StartApp，只能拉起当前用户 |
+| 应用分身 | 支持 | 启动分身需切到主账号或手动切换 |
+
+手机上控制器没有 shell 能力时，`post_shell` 不会抛异常，只是作业失败、输出为空。所以 `agent/actions.py` 的 `_shell()` 会显式判一次作业是否成功：失败就退回框架 `StartApp`（只支持主账号），前台包名与安装列表这两项探测一并跳过，主循环照常跑。选「应用分身」而没有 shell 时会直接失败并写日志，不会偷偷跑去操作主账号。
+
+---
+
 ## 执行流程
 
 ```mermaid
@@ -328,7 +383,9 @@ flowchart TD
 - 无进度信息的任务按执行次数兜底（`timing.max_attempts_per_task`）
 - 今日任务已全部完成时正常结束，不误判为失败
 - 应用分身支持（`am start --user <ID>`）
-- 69 项单元测试（分类优先级、OCR 解析、按钮定位、主循环、页面判别、分身启动、入口折算、参数解码、进度检测、5 个破坏性校验用例）
+- PI 配置项「运行账号」：主账号 / 应用分身，在客户端界面上选（`pipeline_override` 写进 `custom_action_param`，优先于 `config/tasks.json`）
+- 手机端无 shell 时自动降级：改用框架 `StartApp` 拉起主账号，跳过前台包名与安装列表探测，主循环照常跑
+- 104 项单元测试（分类优先级、OCR 解析、按钮定位、主循环、页面判别、分身启动、入 口折算、参数解码、进度检测、手机无 shell 降级、配置项校验、破坏性校验用例）
 - 离线校验器（PI v2 + 协议枚举 + 参数类型 + 引用闭合 + 可达性 + 自定义动作注册）
 
 ### 已在真机验证的部分
@@ -347,7 +404,7 @@ flowchart TD
 2. **搜索框定位**：淘宝搜索入口文案与结构随版本变化，`_run_search` 在找不到输入框时会退化为「停留 + 返回」，不会卡死，但也完不成搜索任务
 3. **跨应用跳转**：跳到外部 App（如直播间、浏览器）后的返回路径未覆盖，目前统一用 `KEYCODE_BACK`
 
-换句话说：**代码与配置是协议正确、被真实框架加载成功、且经 69 项测试验证的，主循环已在真机上把任务进度推到增长；换设备或淘宝改版后仍需用 `--probe` 抓一次实际截图来校准 OCR 文案。**
+换句话说：**代码与配置是协议正确、被真实框架加载成功、且经 104 项测试验证的，主循环已在真机上把任务进度推到增长；换设备或淘宝改版后仍需用 `--probe` 抓一次实际截图来校准 OCR 文案。**
 
 ---
 
