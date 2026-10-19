@@ -18,13 +18,19 @@ from agent.custom import APP_USER_ENV, app_user_id, load_config, start_app_comma
 class FakeJob:
     """模拟 MaaFramework 的 Job：wait() 返回自身，get() 取结果。"""
 
-    def __init__(self, value=None) -> None:
+    def __init__(self, value=None, ok: bool = True) -> None:
         self._value = value
+        self._ok = ok
 
     def wait(self) -> "FakeJob":
         return self
 
+    def succeeded(self) -> bool:
+        return self._ok
+
     def get(self):
+        if not self._ok:
+            raise RuntimeError("job failed")
         return self._value
 
 
@@ -42,6 +48,10 @@ class FakeController:
         self.swipes: list[tuple[int, int, int, int]] = []
         self.inputs: list[str] = []
         self.shells: list[str] = []
+        self.started: list[str] = []
+        # 手机上用 MaaFwApp 时控制器是 Android 原生控制器：没有 shell，
+        # 只能靠框架的 StartApp 拉起应用。
+        self.shell_supported = True
         self.foreground = "com.taobao.taobao"
         self.resolution = list(size)
         self.packages = packages
@@ -67,8 +77,15 @@ class FakeController:
         self.inputs.append(str(text))
         return FakeJob()
 
+    def post_start_app(self, package) -> FakeJob:  # noqa: ANN001
+        self.started.append(str(package))
+        return FakeJob()
+
     def post_shell(self, cmd, timeout=20000) -> FakeJob:  # noqa: ANN001
         self.shells.append(str(cmd))
+        if not self.shell_supported:
+            # 框架对不支持 shell 的控制器会直接让作业失败
+            return FakeJob(None, ok=False)
         if "topResumedActivity" in str(cmd):
             return FakeJob(
                 f"  topResumedActivity=ActivityRecord{{263017643 u999 "
@@ -689,6 +706,53 @@ class AppUserTest(unittest.TestCase):
 
         self.assertTrue(actions.start_app(context, config))
         self.assertEqual(len(context.controller.shells), 1)
+        self.assertIn("--user 999", context.controller.shells[0])
+
+    def test_interface_option_user_id_wins_over_config(self) -> None:
+        """界面上的「运行账号」比 config/tasks.json 优先，否则选分身不生效。"""
+        context = FakeContext([PANEL_ROW])
+        config = load_config()
+        config["app"] = {**config["app"], "user_id": 0}
+
+        self.assertTrue(actions.start_app(context, config, user_id=999))
+        self.assertIn("--user 999", context.controller.shells[0])
+
+    def test_no_shell_falls_back_to_framework_start_app(self) -> None:
+        """手机端控制器没有 shell：主账号要能用框架 StartApp 拉起来。"""
+        context = FakeContext([PANEL_ROW])
+        context.controller.shell_supported = False
+        config = load_config()
+        config["app"] = {**config["app"], "user_id": 0}
+
+        self.assertTrue(actions.start_app(context, config))
+        self.assertEqual(context.controller.started, ["com.taobao.taobao"])
+
+    def test_no_shell_cannot_start_clone_user(self) -> None:
+        """没有 shell 时分身账号（user 999）必须明确失败，不能默默跑去主账号。"""
+        context = FakeContext([PANEL_ROW])
+        context.controller.shell_supported = False
+        config = load_config()
+        config["app"] = {**config["app"], "user_id": 999}
+
+        self.assertFalse(actions.start_app(context, config))
+        self.assertEqual(context.controller.started, [])
+
+    def test_no_shell_skips_foreground_and_package_probes(self) -> None:
+        """没有 shell 时前台包名与安装列表都取不到，主循环不能因此卡死。"""
+        context = FakeContext([PANEL_ROW, DONE_ONLY])
+        context.controller.shell_supported = False
+
+        self.assertEqual(actions._foreground_package(context), "")
+        self.assertEqual(actions._installed_packages(context), set())
+        self.assertTrue(actions.run_daily_loop(context, fast_config(), max_rounds=2))
+
+    def test_custom_action_reads_user_id_from_param(self) -> None:
+        """配置项经 pipeline_override 写进 custom_action_param，动作要收得到。"""
+        context = FakeContext([PANEL_ROW])
+        argv = SimpleNamespace(custom_action_param={"user_id": 999})
+
+        start_cls = _registered_action("taobao_start_app")
+        self.assertTrue(start_cls().run(context, argv))
         self.assertIn("--user 999", context.controller.shells[0])
 
 

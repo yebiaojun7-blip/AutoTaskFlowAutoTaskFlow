@@ -81,6 +81,29 @@ def _swipe_up(context: Any, *, delay: float = 1.0) -> None:
     _sleep(delay)
 
 
+def _shell(context: Any, command: str) -> str | None:
+    """执行一条 shell 命令；控制器没有 shell 能力时返回 None。
+
+    手机上用 MaaFwApp + Shizuku 那条链路跑时，控制器是 MaaFramework 的 Android
+    原生控制器：它只实现了截屏和触摸，没继承 ShellableUnit，因此 post_shell
+    不会抛异常，只是作业失败、输出为空（源码里是 "Shell is not supported for
+    this controller type"）。所以要显式判一次成功与否，否则会把「没执行」
+    当成「执行了但没输出」。
+    """
+    try:
+        job = _controller(context).post_shell(command)
+        job.wait()
+    except Exception:  # noqa: BLE001 - 控制器不支持时可能直接抛，当作没有 shell
+        return None
+    succeeded = getattr(job, "succeeded", None)
+    if callable(succeeded) and not succeeded():
+        return None
+    try:
+        return str(job.get() or "")
+    except Exception:  # noqa: BLE001 - 作业失败时取结果可能抛，同上
+        return None
+
+
 def _screen_size(context: Any) -> tuple[int, int]:
     """取控制器分辨率；取不到时退回 1280x720 基准。"""
     try:
@@ -144,30 +167,50 @@ def _scan(context: Any, node: str = "PanelFullOcr") -> list[panel.OcrItem]:
     return _ocr_items(context, _screencap(context), node)
 
 
-def start_app(context: Any, config: dict[str, Any]) -> bool:
+def start_app(context: Any, config: dict[str, Any], user_id: int | None = None) -> bool:
     """按配置启动淘宝，支持应用分身所在的独立 Android 用户。
 
     为什么不用 Pipeline 的 StartApp 动作：协议里的 StartApp 只有 package 参数，
     由框架固定以当前用户（通常是 user 0）启动。应用分身是另一个 Android 用户
     （本机为 user 999），用 StartApp 永远只会打开主用户那个淘宝。
+
+    user_id 由 PI 配置项传入，优先级最高；没传时用环境变量 / config/tasks.json。
     """
     app = config.get("app") or {}
     package = str(app.get("package") or "com.taobao.taobao")
     activity = str(app.get("activity") or "com.taobao.tao.welcome.Welcome")
     try:
-        user_id = app_user_id(config)
-        command = start_app_command(package, activity, user_id)
-    except ValueError as exc:
+        target_user = app_user_id(config) if user_id is None else int(user_id)
+        if target_user < 0:
+            raise ValueError(f"user_id 不能为负：{target_user}")
+        command = start_app_command(package, activity, target_user)
+    except (TypeError, ValueError) as exc:
         LOGGER.error("启动参数不合法：%s", exc)
         return False
 
-    LOGGER.info("启动 %s（Android 用户 %d）", package, user_id)
-    job = _controller(context).post_shell(command)
-    job.wait()
-    result = job.get()
-    if result is None or "Error" in str(result):
-        LOGGER.warning("启动命令返回异常：%s", result)
+    LOGGER.info("启动 %s（Android 用户 %d）", package, target_user)
+    output = _shell(context, command)
+    if output is not None:
+        if "Error" in output:
+            LOGGER.warning("启动命令返回异常：%s", output)
+        return True
 
+    # 没有 shell 能力（Android 原生控制器）：只能退回框架的 StartApp。
+    # 它没有 --user 参数，拉起的是当前用户那份，分身账号靠它启动不了。
+    if target_user != 0:
+        LOGGER.error(
+            "当前控制器没有 shell 能力，无法启动 Android 用户 %d 上的淘宝；"
+            "请在配置里改选「主账号」，或在电脑上用 adb 运行",
+            target_user,
+        )
+        return False
+
+    LOGGER.warning("当前控制器没有 shell 能力，改用框架 StartApp 启动 %s", package)
+    try:
+        _controller(context).post_start_app(package).wait()
+    except Exception as exc:  # noqa: BLE001 - 起不来就显式失败，让 Pipeline 中止
+        LOGGER.error("启动应用失败：%s", exc)
+        return False
     return True
 
 
@@ -178,13 +221,8 @@ def _foreground_package(context: Any) -> str:
     提示框拦下这次跳转，淘宝就被压到后台，之后无论按多少次返回都回不到任务面板。
     所以要能问出「现在最前面的是谁」，才能决定是不是该把淘宝重新拉到前台。
     """
-    try:
-        job = _controller(context).post_shell(
-            "dumpsys activity activities | grep -m 1 topResumedActivity"
-        )
-        job.wait()
-        output = str(job.get() or "")
-    except Exception:  # noqa: BLE001 - 查不到就当作不知道，不影响主流程
+    output = _shell(context, "dumpsys activity activities | grep -m 1 topResumedActivity")
+    if output is None:
         return ""
     match = _FOREGROUND_RE.search(output)
     return match.group(1) if match else ""
@@ -214,11 +252,10 @@ def _installed_packages(context: Any) -> set[str]:
     """
     packages: set[str] = set()
     for command in ("pm list packages --user 0", "pm list packages"):
-        try:
-            job = _controller(context).post_shell(command)
-            job.wait()
-            output = str(job.get() or "")
-        except Exception:  # noqa: BLE001 - 取不到就当不知道，退回"全部可尝试"
+        output = _shell(context, command)
+        if output is None:
+            # 控制器没有 shell 能力（手机端原生控制器）：退回"全部可尝试"，
+            # 由主循环按执行后有没有推进来决定放弃。
             continue
         for line in output.splitlines():
             line = line.strip()
@@ -519,7 +556,11 @@ def register(agent_server: Any) -> None:
 
     @agent_server.custom_action("taobao_start_app")
     class TaobaoStartApp(CustomAction):
-        """启动淘宝，可指定应用分身所在的 Android 用户。"""
+        """启动淘宝，可指定应用分身所在的 Android 用户。
+
+        user_id 由界面上的「运行账号」配置项经 pipeline_override 写进
+        custom_action_param；不写时退回 config/tasks.json 与环境变量。
+        """
 
         def run(self, context: Context, argv: Any) -> bool:
             try:
@@ -527,7 +568,17 @@ def register(agent_server: Any) -> None:
             except Exception as exc:  # noqa: BLE001 - 配置读不出来必须显式失败
                 LOGGER.error("读取任务配置失败：%s", exc)
                 return False
-            return start_app(context, config)
+
+            raw_user = _parse_params(argv).get("user_id")
+            if raw_user is None:
+                return start_app(context, config)
+            try:
+                user_id = int(raw_user)
+            except (TypeError, ValueError):
+                LOGGER.error("配置项「运行账号」不是整数：%r", raw_user)
+                return False
+            LOGGER.info("按界面配置启动，Android 用户 %d", user_id)
+            return start_app(context, config, user_id=user_id)
 
     @agent_server.custom_action("taobao_open_coin_page")
     class TaobaoOpenCoinPage(CustomAction):
