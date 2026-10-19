@@ -1,0 +1,50 @@
+{
+  "blacklist": [
+    "开通会员",
+    "绑定银行卡",
+    "下载应用",
+    "充值",
+    "贷款",
+    "组队"
+  ],
+  "jump_tasks": [
+    "去逛逛",
+    "逛一逛",
+    "点击去逛",
+    "去蚂蚁庄园",
+    "去蚂蚁森林",
+    "去支付宝农场",
+    "看直播",
+    "浏览会场"
+  ],
+  "search_tasks": [
+    "搜索",
+    "搜一搜",
+    "搜索商品",
+    "搜索有福利"
+  ],
+  "browse_tasks": [
+    "浏览商品",
+    "浏览推荐",
+    "浏览店铺",
+    "好物沉浸看",
+    "拍立淘"
+  ],
+  "safety_keywords": [
+    "安全验证",
+    "拖动滑块",
+    "请完成验证"
+  ],
+  "search_keywords": [
+    "手机壳",
+    "收纳盒",
+    "保温杯"
+  ],
+  "timing": {
+    "min_task_delay_seconds": 1,
+    "max_task_delay_seconds": 3,
+    "browse_duration_seconds": 3,
+    "jump_duration_seconds": 5,
+    "max_empty_rounds": 3
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "OpenTaobao": {
+    "action": "StartApp",
+    "package": "com.taobao.taobao",
+    "post_delay": 5000,
+    "next": ["OpenCoinPage"]
+  },
+  "OpenCoinPage": {
+    "recognition": "OCR",
+    "expected": ["淘金币", "领金币", "我的淘金币"],
+    "action": "Click",
+    "pre_delay": 500,
+    "post_delay": 2500,
+    "timeout": 15000,
+    "max_hit": 1,
+    "next": ["WaitCoinPanel"],
+    "on_error": ["AbortTask"]
+  },
+  "WaitCoinPanel": {
+    "recognition": "OCR",
+    "expected": ["赚金币抵钱", "完成进度", "去完成", "今日累计奖励", "领取奖励", "立即领取"],
+    "action": "DoNothing",
+    "pre_delay": 1500,
+    "timeout": 15000,
+    "next": ["DailyTaskLoop"],
+    "on_error": ["DailyDone", "AbortTask"]
+  },
+  "DailyDone": {
+    "recognition": "OCR",
+    "expected": ["奖励已拿完", "记得明天再来"],
+    "action": "StopTask",
+    "timeout": 8000
+  }
+}

@@ -1,0 +1,37 @@
+{
+    "interface_version": 2,
+    "name": "AutoTaskFlow",
+    "version": "0.2.0",
+    "description": "淘宝淘金币日常任务自动化（MaaFramework + 纯截图 OCR）",
+    "controller": [
+        {
+            "name": "Android",
+            "label": "Android 设备（ADB）",
+            "type": "Adb",
+            "display_short_side": 720
+        }
+    ],
+    "resource": [
+        {
+            "name": "AutoTaskFlow",
+            "label": "淘金币日常任务",
+            "path": [
+                "assets/resource"
+            ]
+        }
+    ],
+    "task": [
+        {
+            "name": "TaobaoCoinDaily",
+            "label": "淘宝淘金币日常任务",
+            "entry": "OpenTaobao",
+            "default_check": true
+        }
+    ],
+    "agent": {
+        "child_exec": "python",
+        "child_args": [
+            "./agent/main.py"
+        ]
+    }
+}

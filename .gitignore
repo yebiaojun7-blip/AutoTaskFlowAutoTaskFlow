@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+logs/
+screenshots/
+debug/
+# OCR 模型体积大（约 30MB），按 README 自行下载，不进仓库
+assets/resource/model/ocr/*
+!assets/resource/model/ocr/.gitkeep
+# 临时调试截图
+t*.png

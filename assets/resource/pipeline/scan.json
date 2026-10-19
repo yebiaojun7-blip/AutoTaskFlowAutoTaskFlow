@@ -1,0 +1,26 @@
+{
+  "PanelFullOcr": {
+    "recognition": "OCR",
+    "action": "DoNothing",
+    "timeout": 10000
+  },
+  "SearchBoxOcr": {
+    "recognition": "OCR",
+    "expected": ["搜索", "搜一搜", "请输入"],
+    "action": "DoNothing",
+    "timeout": 10000
+  },
+  "DailyTaskLoop": {
+    "recognition": "DirectHit",
+    "action": "Custom",
+    "custom_action": "taobao_daily_loop",
+    "custom_action_param": {
+      "max_rounds": 20
+    },
+    "pre_delay": 300,
+    "post_delay": 300,
+    "timeout": 600000,
+    "next": ["[JumpBack]SafetyVerify", "FinishCheck"],
+    "on_error": ["AbortTask"]
+  }
+}

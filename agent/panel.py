@@ -1,0 +1,266 @@
+"""淘金币任务面板的纯逻辑：OCR 结果解析、安全词检测与任务挑选。
+
+本模块不导入 maa，因此可以在没有 MaaFramework 运行时的机器上直接跑单元测试。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Iterable, Sequence
+
+from agent.custom import TaskDecision, classify_task, load_config
+
+
+# 可执行任务的分类结果，用于判断一次挑选是否命中。
+EXECUTABLE_KINDS = ("search", "jump", "browse")
+
+# 任务面板的特征词，用于判断"当前是否还停留在淘金币任务面板"。
+# 真机（一加 Ace 3 / 淘宝 双11版）实测：面板标题为「赚金币抵钱」，
+# 首屏一定能看到「今日累计奖励」与「完成进度 x/20」。
+PANEL_MARKERS = (
+    "赚金币抵钱",
+    "今日累计奖励",
+    "完成进度",
+    "去完成",
+    "领取奖励",
+    "立即领取",
+)
+
+# 可点击的按钮文案。任务名在左侧、按钮在右侧同一行，所以点击应打在按钮上。
+# 实测本机型上同一面板会混用「去完成」「去逛逛」「逛一逛」「领取奖励」。
+DEFAULT_ACTION_BUTTONS = (
+    "去完成",
+    "立即完成",
+    "去搜索",
+    "去浏览",
+    "去逛逛",
+    "逛一逛",
+    "领取奖励",
+    "立即领取",
+)
+
+# 同一行文字的纵坐标容差（像素），用于把 OCR 结果还原成阅读顺序。
+ROW_TOLERANCE = 20
+
+
+@dataclass(frozen=True)
+class OcrItem:
+    """一条 OCR 识别结果。坐标是 MaaFramework 缩放后的截图坐标系。"""
+
+    text: str
+    x: int
+    y: int
+    width: int
+    height: int
+    score: float = 0.0
+
+    @property
+    def center(self) -> tuple[int, int]:
+        """文字块中心点，用作点击坐标。"""
+        return self.x + self.width // 2, self.y + self.height // 2
+
+    @property
+    def box(self) -> list[int]:
+        """MaaFramework 使用的 [x, y, w, h] 形式。"""
+        return [self.x, self.y, self.width, self.height]
+
+
+@dataclass(frozen=True)
+class PanelPick:
+    """一次面板挑选的结果。item 为 None 表示当前屏没有可执行任务。"""
+
+    decision: TaskDecision
+    item: OcrItem | None
+    skipped: tuple[str, ...] = ()
+
+
+def normalize_text(text: Any) -> str:
+    """去掉文本中的空白，OCR 常把中文字之间插入空格。"""
+    return "".join(str(text).split())
+
+
+def _field(raw: Any, name: str, default: Any = None) -> Any:
+    """兼容 MaaFramework 返回的 dict 与 dataclass 两种形态。"""
+    if isinstance(raw, dict):
+        return raw.get(name, default)
+    return getattr(raw, name, default)
+
+
+def parse_ocr_items(results: Iterable[Any]) -> list[OcrItem]:
+    """把 MaaFramework 的 OCR 结果统一成 OcrItem，并按阅读顺序排序。"""
+    items: list[OcrItem] = []
+    for raw in results or []:
+        text = normalize_text(_field(raw, "text", ""))
+        box = _field(raw, "box", None)
+        if not text or not box or len(box) != 4:
+            continue
+        x, y, width, height = (int(value) for value in box)
+        if width <= 0 or height <= 0:
+            continue
+        score = float(_field(raw, "score", 0.0) or 0.0)
+        items.append(OcrItem(text, x, y, width, height, score))
+    return reading_order(items)
+
+
+def reading_order(items: Sequence[OcrItem]) -> list[OcrItem]:
+    """按从上到下、同一行内从左到右排序。"""
+    ordered: list[OcrItem] = []
+    row: list[OcrItem] = []
+    row_top: int | None = None
+    for item in sorted(items, key=lambda value: (value.y, value.x)):
+        if row_top is None or abs(item.y - row_top) <= ROW_TOLERANCE:
+            row.append(item)
+            row_top = item.y if row_top is None else row_top
+            continue
+        ordered.extend(sorted(row, key=lambda value: value.x))
+        row = [item]
+        row_top = item.y
+    ordered.extend(sorted(row, key=lambda value: value.x))
+    return ordered
+
+
+def find_safety(items: Iterable[OcrItem], keywords: Iterable[str]) -> OcrItem | None:
+    """命中安全验证类关键词时返回对应文字块，调用方应立即停止任务。"""
+    for item in items:
+        for keyword in keywords:
+            normalized = normalize_text(keyword)
+            if normalized and normalized in item.text:
+                return item
+    return None
+
+
+def find_text_by_keywords(items: Iterable[OcrItem], keywords: Iterable[str]) -> OcrItem | None:
+    """按给定文案顺序找第一个命中的文字块，未命中返回 None。"""
+    wanted = [normalize_text(word) for word in keywords]
+    for item in items:
+        for word in wanted:
+            if word and word in item.text:
+                return item
+    return None
+
+
+def panel_visible(items: Iterable[OcrItem], markers: Iterable[str] = PANEL_MARKERS) -> bool:
+    """当前屏是否仍显示淘金币任务面板。"""
+    for item in items:
+        for marker in markers:
+            normalized = normalize_text(marker)
+            if normalized and normalized in item.text:
+                return True
+    return False
+
+
+# 双11 组队活动页的特征词。这个页面是活动广告，没有日常任务，误入后直接退出。
+# 注意：不要用「组队赢」——那个按钮在淘金币首页上也存在，会误判。
+TEAM_PAGE_MARKERS = (
+    "组队大奖赛",
+    "车队已凑齐",
+    "拉人助力",
+    "组队完成",
+)
+
+# 淘金币赛车首页的特征词。与任务面板的区别：首页有「赚能量」和「升级赛车」，
+# 面板则是「赚金币抵钱」「完成进度」。在首页按返回键会直接退出淘金币，
+# 所以必须改点「赚金币」重新打开面板。
+COIN_HOME_MARKERS = (
+    "升级赛车",
+    "赚能量",
+)
+
+# 淘金币首页上打开任务面板的入口文字。
+COIN_HOME_ENTRY = ("赚金币",)
+
+# 今日任务全部完成时抖出的提示页/弹窗特征词。
+# 真机实测：弹窗标题「今日速赚570淘金币」，正文「今日快速赚奖励已拿完 / 记得明天再来」。
+# 这是正常结束，不能当成识别失败去走 AbortTask。
+DAILY_DONE_MARKERS = (
+    "奖励已拿完",
+    "记得明天再来",
+    "已完成，明天",
+)
+
+
+def daily_done_visible(items: Iterable[OcrItem]) -> bool:
+    """当前屏是否显示"今日任务已全部完成"提示。"""
+    return panel_visible(items, DAILY_DONE_MARKERS)
+
+
+def team_page_visible(items: Iterable[OcrItem]) -> bool:
+    """当前屏是否是双11组队活动页（需要退出而不是继续操作）。"""
+    return panel_visible(items, TEAM_PAGE_MARKERS)
+
+
+def coin_home_visible(items: Iterable[OcrItem]) -> bool:
+    """当前屏是否是淘金币赛车首页（可以点「赚金币」进入任务面板）。"""
+    return panel_visible(items, COIN_HOME_MARKERS)
+
+
+def pick_task(
+    items: Sequence[OcrItem],
+    config: dict[str, Any] | None = None,
+    *,
+    kinds: Sequence[str] | None = None,
+) -> PanelPick:
+    """按阅读顺序挑出第一个可执行任务。
+
+    黑名单、已完成等不可执行项会被记录到 skipped 中，便于日志排查。
+    kinds 用于限定只挑选某一类任务（Pipeline 中区分搜索/浏览/跳转分支）。
+    """
+    config = config or load_config()
+    allowed = tuple(kinds) if kinds else EXECUTABLE_KINDS
+    skipped: list[str] = []
+    for item in items:
+        decision = classify_task(item.text, config)
+        if decision.kind in allowed:
+            return PanelPick(decision, item, tuple(skipped))
+        skipped.append(f"{item.text}({decision.reason or decision.kind})")
+    return PanelPick(TaskDecision("none", reason="当前屏没有可执行任务"), None, tuple(skipped))
+
+
+def find_action_button(
+    items: Sequence[OcrItem],
+    target: OcrItem,
+    buttons: Sequence[str] = DEFAULT_ACTION_BUTTONS,
+) -> OcrItem | None:
+    """在同一行内找到任务名右侧的可点击按钮，点击坐标应打在按钮上。
+
+    OCR 通常把"浏览商品"和"去完成"识别成两个独立文字块。若整行文字本身
+    就含有"去完成"（某些界面会合并成一条），直接返回该文字块。
+    """
+    for button in buttons:
+        normalized = normalize_text(button)
+        if normalized and normalized in target.text:
+            return target
+
+    best: OcrItem | None = None
+    for item in items:
+        if item is target or abs(item.y - target.y) > ROW_TOLERANCE:
+            continue
+        if item.x <= target.x:
+            continue
+        for button in buttons:
+            normalized = normalize_text(button)
+            if normalized and normalized in item.text:
+                if best is None or item.x < best.x:
+                    best = item
+                break
+    return best
+
+
+def search_keyword(config: dict[str, Any], attempt: int = 0) -> str:
+    """按轮次轮换搜索关键词，避免反复搜索同一词被判定为异常行为。"""
+    keywords = config.get("search_keywords") or []
+    if not keywords:
+        return ""
+    return str(keywords[attempt % len(keywords)])
+
+
+def action_duration(kind: str, config: dict[str, Any]) -> float:
+    """不同任务类型在目标页面的停留秒数。"""
+    timing = config.get("timing", {})
+    key = {
+        "browse": "browse_duration_seconds",
+        "jump": "jump_duration_seconds",
+    }.get(kind)
+    if not key:
+        return 0.0
+    return float(timing.get(key, 3))

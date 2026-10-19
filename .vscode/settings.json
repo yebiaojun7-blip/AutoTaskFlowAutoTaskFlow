@@ -1,0 +1,27 @@
+{
+  "window.zoomLevel": 1,
+  "files.autoSave": "afterDelay",
+  "gitlens.home.preview.enabled": false,
+  "notebook.diff.enablePreview": false,
+  "search.useReplacePreview": false,
+  "workbench.editor.enablePreview": false,
+  "editor.rename.enablePreview": false,
+  "terminal.integrated.fontFamily": "'0xProto Nerd Font'",
+  "terminal.integrated.fontSize": 13,
+  "files.autoSaveDelay": 100,
+  "workbench.tree.indent": 15,
+  "workbench.tree.renderIndentGuides": "always",
+  "workbench.colorCustomizations": {
+    "tree.indentGuidesStroke": "#05ef3c"
+  },
+  // 本项目的 .html 全是 Jinja2 模板，prettier 保存时会改坏 {{ }} / {% %}。
+  // 单独关掉 HTML 的保存格式化（md / yml 仍保留自动格式化）。
+  "[html]": {
+    "editor.formatOnSave": false
+  },
+  // "editor.fontFamily": "Fira Code",
+  "editor.fontLigatures": true,
+  "editor.fontSize": 18,
+  "editor.inlineSuggest.minShowDelay": 5,
+  "editor.formatOnSave": false
+}
