@@ -190,6 +190,104 @@ def validate_interface(interface: dict[str, Any]) -> tuple[list[Path], list[str]
     return bundle_roots, entries
 
 
+OPTION_TYPES = ("select", "checkbox", "input", "hotkey", "switch")
+# 配置项允许改写的 pipeline 字段。本项目只用 custom_action_param 传运行参数，
+# 写错字段名框架会默默忽略，所以在这里白名单化。
+OPTION_OVERRIDE_FIELDS = ("custom_action_param", "enabled", "timeout", "expected", "next")
+
+
+def validate_options(
+    interface: dict[str, Any], nodes: dict[str, dict[str, Any]]
+) -> int:
+    """校验 interface.json 的 option，返回配置项个数。
+
+    option 写错不会报错，只会在客户端界面上少一个开关，或者 pipeline_override
+    改到不存在的节点——届时所有实际效果都消失，排查起来极难。
+    """
+    options = interface.get("option")
+    if options is None:
+        return 0
+    if not isinstance(options, dict):
+        raise ValidationError("interface.json 的 option 必须是对象")
+
+    for name, option in options.items():
+        origin = f"option {name}"
+        if not isinstance(option, dict):
+            raise ValidationError(f"{origin} 必须是对象")
+        kind = option.get("type", "select")
+        if kind not in OPTION_TYPES:
+            raise ValidationError(f"{origin} 的 type 非法: {kind!r}")
+        cases = option.get("cases")
+        if not isinstance(cases, list) or not cases:
+            raise ValidationError(f"{origin} 的 cases 必须是非空数组")
+
+        case_names: set[str] = set()
+        for case in cases:
+            if not isinstance(case, dict):
+                raise ValidationError(f"{origin} 的 cases 元素必须是对象")
+            case_name = case.get("name")
+            if not isinstance(case_name, str) or not case_name:
+                raise ValidationError(f"{origin} 的 cases 元素缺少 name")
+            if case_name in case_names:
+                raise ValidationError(f"{origin} 的 case 重名: {case_name}")
+            case_names.add(case_name)
+            _validate_override(f"{origin} 的 case {case_name}", case, nodes)
+
+        default_case = option.get("default_case")
+        if default_case is None:
+            continue
+        wanted = default_case if isinstance(default_case, list) else [default_case]
+        if not all(isinstance(item, str) for item in wanted):
+            raise ValidationError(f"{origin} 的 default_case 必须是字符串或字符串数组")
+        unknown = [item for item in wanted if item not in case_names]
+        if unknown:
+            raise ValidationError(f"{origin} 的 default_case 引用了不存在的 case: {', '.join(unknown)}")
+
+    # 任务引用到的配置项必须真的存在，否则界面上什么都不显示。
+    for task in interface.get("task", []):
+        for referenced in task.get("option", []) or []:
+            if referenced not in options:
+                raise ValidationError(
+                    f"任务 {task.get('name')} 引用了未定义的配置项: {referenced}"
+                )
+
+    return len(options)
+
+
+def _validate_override(
+    origin: str, holder: dict[str, Any], nodes: dict[str, dict[str, Any]]
+) -> None:
+    """检查一段 pipeline_override：节点必须存在，字段与取值都在允许范围内。"""
+    override = holder.get("pipeline_override")
+    if override is None:
+        return
+    if not isinstance(override, dict):
+        raise ValidationError(f"{origin} 的 pipeline_override 必须是对象")
+    for node_name, patch in override.items():
+        if node_name not in nodes:
+            raise ValidationError(f"{origin} 的 pipeline_override 指向不存在的节点: {node_name}")
+        if not isinstance(patch, dict):
+            raise ValidationError(f"{origin} 的 pipeline_override[{node_name}] 必须是对象")
+        unknown = sorted(set(patch) - set(OPTION_OVERRIDE_FIELDS))
+        if unknown:
+            raise ValidationError(
+                f"{origin} 的 pipeline_override[{node_name}] 含未支持字段: {', '.join(unknown)}"
+            )
+        if "custom_action_param" in patch:
+            _validate_action_param(f"{origin} 的 {node_name}", patch["custom_action_param"])
+
+
+def _validate_action_param(origin: str, param: Any) -> None:
+    """custom_action_param 必须是对象，且 user_id（如有）必须是非负整数。"""
+    if not isinstance(param, dict):
+        raise ValidationError(f"{origin} 的 custom_action_param 必须是对象")
+    if "user_id" not in param:
+        return
+    user_id = param["user_id"]
+    if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id < 0:
+        raise ValidationError(f"{origin} 的 custom_action_param.user_id 必须是非负整数")
+
+
 # --------------------------------------------------------------------------- #
 # Pipeline
 # --------------------------------------------------------------------------- #
@@ -403,6 +501,8 @@ def validate() -> list[str]:
     for name, node in all_nodes.items():
         validate_node(name, node)
 
+    option_count = validate_options(interface, all_nodes)
+
     references = collect_references(all_nodes)
     dangling = sorted({target for targets in references.values() for target in targets} - set(all_nodes))
     if dangling:
@@ -430,7 +530,7 @@ def validate() -> list[str]:
     rule_count = validate_task_config(read_json(TASK_CONFIG_FILE))
     agent_files = compile_agent()
 
-    messages.append(f"Interface: PI v2 校验通过，{len(entries)} 个任务入口")
+    messages.append(f"Interface: PI v2 校验通过，{len(entries)} 个任务入口 / {option_count} 个配置项")
     messages.append(
         f"Pipeline: {file_count} 个文件 / {len(all_nodes)} 个节点 / "
         f"{sum(len(value) for value in references.values())} 个引用"

@@ -163,6 +163,82 @@ class BrokenProjectTest(unittest.TestCase):
             vp.validate_interface(interface)
 
 
+class OptionTest(unittest.TestCase):
+    """配置项写错不会报错，只会在界面上少一个开关，所以必须校验。"""
+
+    def nodes(self) -> dict:
+        return {"OpenTaobao": {}, "OpenCoinPage": {}}
+
+    def interface(self, **overrides) -> dict:
+        data = {
+            "task": [{"name": "T", "entry": "OpenTaobao", "option": ["运行账号"]}],
+            "option": {
+                "运行账号": {
+                    "type": "select",
+                    "default_case": "主账号",
+                    "cases": [
+                        {
+                            "name": "主账号",
+                            "pipeline_override": {
+                                "OpenTaobao": {"custom_action_param": {"user_id": 0}}
+                            },
+                        }
+                    ],
+                }
+            },
+        }
+        data.update(overrides)
+        return data
+
+    def test_real_interface_options_are_valid(self) -> None:
+        interface = vp.read_json(vp.INTERFACE_FILE)
+        nodes, _ = vp.load_pipeline(vp.ROOT / "assets" / "resource")
+        self.assertGreaterEqual(vp.validate_options(interface, nodes), 1)
+
+    def test_unknown_type_fails(self) -> None:
+        self.assertGreaterEqual(vp.validate_options(self.interface(), self.nodes()), 1)
+        with self.assertRaises(vp.ValidationError):
+            vp.validate_options(self.interface(option={"x": {"type": "magic", "cases": [{"name": "a"}]}}), self.nodes())
+
+    def test_default_case_must_exist(self) -> None:
+        data = self.interface()
+        data["option"]["运行账号"]["default_case"] = "不存在的选项"
+        with self.assertRaises(vp.ValidationError):
+            vp.validate_options(data, self.nodes())
+
+    def test_task_referencing_missing_option_fails(self) -> None:
+        data = self.interface(option={})
+        with self.assertRaises(vp.ValidationError):
+            vp.validate_options(data, self.nodes())
+
+    def test_override_must_target_existing_node(self) -> None:
+        """节点名写错时框架会静默忽略，配置项就等于没生效。"""
+        data = self.interface()
+        data["option"]["运行账号"]["cases"][0]["pipeline_override"] = {
+            "OpenTaoBao": {"custom_action_param": {"user_id": 0}}
+        }
+        with self.assertRaises(vp.ValidationError):
+            vp.validate_options(data, self.nodes())
+
+    def test_override_unknown_field_fails(self) -> None:
+        data = self.interface()
+        data["option"]["运行账号"]["cases"][0]["pipeline_override"] = {
+            "OpenTaobao": {"custom_action_params": {"user_id": 0}}
+        }
+        with self.assertRaises(vp.ValidationError):
+            vp.validate_options(data, self.nodes())
+
+    def test_user_id_must_be_non_negative_int(self) -> None:
+        for bad in ("999", -1, True, None, 999.0):
+            with self.subTest(bad=bad):
+                data = self.interface()
+                data["option"]["运行账号"]["cases"][0]["pipeline_override"] = {
+                    "OpenTaobao": {"custom_action_param": {"user_id": bad}}
+                }
+                with self.assertRaises(vp.ValidationError):
+                    vp.validate_options(data, self.nodes())
+
+
 if __name__ == "__main__":
     logging.disable(logging.CRITICAL)
     unittest.main()

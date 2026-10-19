@@ -1,12 +1,12 @@
 {
     "interface_version": 2,
     "name": "AutoTaskFlow",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "description": "淘宝淘金币日常任务自动化（MaaFramework + 纯截图 OCR）",
     "controller": [
         {
             "name": "Android",
-            "label": "Android 设备（ADB）",
+            "label": "Android 设备",
             "type": "Adb",
             "display_short_side": 720
         }
@@ -24,10 +24,46 @@
         {
             "name": "TaobaoCoinDaily",
             "label": "淘宝淘金币日常任务",
+            "description": "进淘金币任务面板，逐个做浏览 / 搜索 / 跳转任务，做完领奖励。",
             "entry": "OpenTaobao",
-            "default_check": true
+            "default_check": true,
+            "option": [
+                "运行账号"
+            ]
         }
     ],
+    "option": {
+        "运行账号": {
+            "type": "select",
+            "label": "运行账号",
+            "description": "淘金币登录在哪个 Android 用户下。应用分身是独立用户（本机 999），主账号是 0。",
+            "default_case": "主账号",
+            "cases": [
+                {
+                    "name": "主账号",
+                    "label": "主账号（Android 用户 0）",
+                    "pipeline_override": {
+                        "OpenTaobao": {
+                            "custom_action_param": {
+                                "user_id": 0
+                            }
+                        }
+                    }
+                },
+                {
+                    "name": "应用分身",
+                    "label": "应用分身（Android 用户 999）",
+                    "pipeline_override": {
+                        "OpenTaobao": {
+                            "custom_action_param": {
+                                "user_id": 999
+                            }
+                        }
+                    }
+                }
+            ]
+        }
+    },
     "agent": {
         "child_exec": "python",
         "child_args": [
