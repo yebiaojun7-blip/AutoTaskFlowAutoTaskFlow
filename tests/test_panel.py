@@ -29,7 +29,12 @@ class FakeJob:
 
 
 class FakeController:
-    def __init__(self, screens: list[list[dict]], size=(1280, 720)) -> None:
+    def __init__(
+        self,
+        screens: list[list[dict]],
+        size=(1280, 720),
+        packages: list[str] | None = None,
+    ) -> None:
         self.screens = screens
         self.index = 0
         self.clicks: list[tuple[int, int]] = []
@@ -39,6 +44,7 @@ class FakeController:
         self.shells: list[str] = []
         self.foreground = "com.taobao.taobao"
         self.resolution = list(size)
+        self.packages = packages
 
     def post_screencap(self) -> FakeJob:
         index = min(self.index, len(self.screens) - 1)
@@ -68,15 +74,17 @@ class FakeController:
                 f"  topResumedActivity=ActivityRecord{{263017643 u999 "
                 f"{self.foreground}/com.taobao.tao.welcome.Welcome t11518}}"
             )
+        if "pm list packages" in str(cmd) and self.packages is not None:
+            return FakeJob("\n".join(f"package:{name}" for name in self.packages))
         return FakeJob("")
 
 
 class FakeContext:
     """把截图序号映射到预先安排好的 OCR 结果。"""
 
-    def __init__(self, screens: list[list[dict]]) -> None:
+    def __init__(self, screens: list[list[dict]], packages: list[str] | None = None) -> None:
         self.screens = screens
-        self.controller = FakeController(screens)
+        self.controller = FakeController(screens, packages=packages)
         self.tasker = SimpleNamespace(controller=self.controller)
         self.reco_entries: list[str] = []
 
@@ -233,7 +241,13 @@ class PickTaskTest(unittest.TestCase):
 
 class DailyLoopTest(unittest.TestCase):
     def test_browse_task_is_clicked_then_loop_ends(self) -> None:
-        context = FakeContext([PANEL_ROW, DONE_ONLY, DONE_ONLY])
+        # 主账号的面板没有「完成进度」行，任务全部领完后靠滑回顶部复查收尾。
+        claimed = [
+            text_item("赚金币抵钱", 100, 150, 300, 48),
+            text_item("今日累计奖励", 100, 220, 240, 40),
+            text_item("已领取", 100, 300),
+        ]
+        context = FakeContext([PANEL_ROW, claimed, claimed])
         config = fast_config()
 
         result = actions.run_daily_loop(context, config, max_rounds=5)
@@ -804,6 +818,107 @@ class ProgressTest(unittest.TestCase):
 
         self.assertTrue(result)
         self.assertGreaterEqual(len(context.controller.clicks), 3)
+
+
+class OffsiteAppTest(unittest.TestCase):
+    """跳外部应用的任务只在整台手机都没装该应用时才放弃。
+
+    关键在于判断范围是**手机**而不是当前账号：应用分身只是把淘宝克隆了一份，
+    本机应用共用，分身里点「去蚂蚁庄园」照样能拉起支付宝。
+    """
+
+    PHONE = [
+        "com.taobao.taobao",
+        "com.eg.android.AlipayGphone",
+        "com.taobao.idlefish",
+        "com.baidu.searchbox",
+        "com.heytap.browser",
+    ]
+
+    def test_required_package_is_read_from_task_name(self) -> None:
+        self.assertEqual(panel.required_package("去蚂蚁庄园逛逛哟(0/1)"), "com.eg.android.AlipayGphone")
+        self.assertEqual(panel.required_package("去逛逛今日头条"), "com.ss.android.article.news")
+        self.assertIsNone(panel.required_package("浏览商品"))
+
+    def test_task_is_unreachable_only_when_phone_lacks_the_app(self) -> None:
+        self.assertFalse(panel.task_unreachable("去蚂蚁庄园逛逛哟(0/1)", self.PHONE))
+        self.assertFalse(panel.task_unreachable("去闲鱼逛逛", self.PHONE))
+        # 这台手机没装今日头条，这类任务点下去必然失败。
+        self.assertTrue(panel.task_unreachable("去逛逛今日头条", self.PHONE))
+
+    def test_alipay_task_runs_even_though_data_space_lacks_the_package(self) -> None:
+        """复现用户反馈：分身里支付宝任务必须照做，不能被包名判断当掉。"""
+        screen = [
+            text_item("赚金币抵钱", 100, 150, 300, 48),
+            text_item("今日累计奖励", 100, 220, 240, 40),
+            text_item("去蚂蚁庄园逛逛哟(0/1)", 100, 300),
+            text_item("去完成", 900, 300, 120, 40),
+        ]
+        # packages 传的是整机清单（含支付宝），而不是分身账号的 15 个包。
+        context = FakeContext([screen], packages=self.PHONE)
+        actions.run_daily_loop(context, fast_config(), max_rounds=2)
+
+        # 任务真的被点下去做了（点「去完成」，做完按返回）。
+        self.assertTrue(context.controller.clicks)
+        self.assertEqual(set(context.controller.clicks), {(960, 320)})
+        self.assertIn(4, context.controller.keys)
+
+    def test_task_needing_missing_app_is_skipped_without_clicking(self) -> None:
+        # 「去逛逛」类任务要真的跳出淘宝；本机没装今日头条，点下去必失败。
+        screen = [
+            text_item("赚金币抵钱", 100, 150, 300, 48),
+            text_item("今日累计奖励", 100, 220, 240, 40),
+            text_item("去逛逛今日头条", 100, 300),
+            text_item("去完成", 900, 300, 120, 40),
+        ]
+        context = FakeContext([screen], packages=self.PHONE)
+        with self.assertLogs("autotaskflow", level="WARNING") as logs:
+            actions.run_daily_loop(context, fast_config(), max_rounds=3)
+
+        self.assertEqual(context.controller.clicks, [])
+        self.assertTrue(any("没装这个应用" in line for line in logs.output))
+
+    def test_unknown_package_list_does_not_block_anything(self) -> None:
+        """取不到包名列表时应退回「全部可尝试」，不能把任务全当掉。"""
+        self.assertFalse(panel.task_unreachable("去逛逛今日头条", set()))
+
+
+class CompletionTest(unittest.TestCase):
+    """今日是否做完，要按两种面板形态分别判断。"""
+
+    def test_progress_row_reaching_total_means_done(self) -> None:
+        items = panel.parse_ocr_items(DONE_ONLY)
+        self.assertEqual(panel.overall_progress(items), (20, 20))
+        self.assertTrue(panel.overall_done(items))
+
+    def test_progress_row_not_full_is_not_done(self) -> None:
+        items = panel.parse_ocr_items(
+            [
+                text_item("赚金币抵钱", 100, 150, 300, 48),
+                text_item("完成进度 3/20", 100, 260, 260, 36),
+                text_item("浏览商品(0/5)", 100, 300),
+                text_item("去完成", 900, 300, 120, 40),
+            ]
+        )
+        self.assertEqual(panel.overall_progress(items), (3, 20))
+        self.assertFalse(panel.overall_done(items))
+
+    def test_main_account_has_no_progress_row_but_can_still_be_done(self) -> None:
+        """主账号面板没有「完成进度」，这时不能根据「没找到进度行」就判完成。
+
+        面板可以下滑，停在中间时下面的任务根本不在截图里，所以无进度行时
+        必须交给主循环滑回顶部复查，靠连续空轮判定结束。
+        """
+        items = panel.parse_ocr_items(
+            [
+                text_item("赚金币抵钱", 100, 150, 300, 48),
+                text_item("今日累计奖励", 100, 220, 240, 40),
+                text_item("已领取", 100, 300),
+                text_item("领取总金币", 100, 360),
+            ]
+        )
+        self.assertIsNone(panel.overall_progress(items))
+        self.assertFalse(panel.overall_done(items))
 
 
 if __name__ == "__main__":

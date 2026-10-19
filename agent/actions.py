@@ -126,12 +126,12 @@ def _run_task(context: Any, pick: panel.PanelPick, config: dict[str, Any], butto
         _run_search(context, keyword, config, _screencap(context))
         return
 
-    # 跳转类任务（蚂蚁庄园 / 蚂蚁森林 / 支付宝农场）点下去会弹「想要打开支付宝小程序」，
-    # 要真的点「打开」进去做，不能取消：取消就是放弃任务。
+    # 跳转类任务（蚂蚁庄园 / 蚂蚁森林 / 跳闲鱼 / 站外页）点下去会弹确认框，
+    # 要真的点确认进去做，不能取消：取消就是放弃任务。
     # 这个框盖在面板上方且面板文字仍能被识别，不处理就会永远卡在这里。
     if kind == "jump":
         items = _scan(context)
-        if panel.open_app_dialog_visible(items) and _confirm_open_app_dialog(context, items):
+        if panel.open_app_dialog_visible(items) and _open_app_dialog_action(context, items):
             LOGGER.info("已确认打开外部小程序，进去做任务「%s」", pick.item.text)
 
     duration = panel.action_duration(kind, config)
@@ -204,15 +204,40 @@ def _ensure_taobao_foreground(context: Any, config: dict[str, Any]) -> bool:
     return True
 
 
-def _confirm_open_app_dialog(context: Any, items: list[panel.OcrItem], *, tries: int = 3) -> bool:
-    """碰到「想要打开其他应用」确认框就点「打开」，真的跳进去做任务。
+def _installed_packages(context: Any) -> set[str]:
+    """取整台手机上装了哪些应用（按主账号 user 0 清点）。
 
-    跳支付宝的任务（蚂蚁庄园 / 蚂蚁森林 / 支付宝农场）点击后会出这个框。
-    框盖在面板上方但面板文字仍能被 OCR 认出来，所以必须主动识别并处理，
-    否则每轮都会重复点同一个任务、重复被同一个框拦住。
+    注意范围：查的是**手机**，不是当前运行的账号。应用分身只是把淘宝克隆了一份，
+    本机应用是共用的，分身里点「去蚂蚁庄园」照样能拉起支付宝。
+    所以只有整台手机都没装的才排除（实测本机没有今日头条），
+    否则会把本来能做的任务当掉。
+    """
+    packages: set[str] = set()
+    for command in ("pm list packages --user 0", "pm list packages"):
+        try:
+            job = _controller(context).post_shell(command)
+            job.wait()
+            output = str(job.get() or "")
+        except Exception:  # noqa: BLE001 - 取不到就当不知道，退回"全部可尝试"
+            continue
+        for line in output.splitlines():
+            line = line.strip()
+            if line.startswith("package:"):
+                packages.add(line[len("package:"):])
+        if packages:
+            break
+    return packages
 
-    这里选「打开」而不是「取消」：目标任务就是要进支付宝才能完成，
-    取消等于放弃。进去做完再由 _recover_to_panel 把淘宝拉回来。
+
+def _open_app_dialog_action(context: Any, items: list[panel.OcrItem], *, tries: int = 3) -> bool:
+    """碰到「想要打开其他应用」确认框就点确认，真的跳进去做任务。
+
+    跳外部应用的任务（蚂蚁庄园 / 蚂蚁森林 / 跳闲鱼 / 浏览器打开站外页）点击后
+    会出这个框。框盖在面板上方但面板文字仍能被 OCR 认出来，所以必须主动识别并
+    处理，否则每轮都会重复点同一个任务、重复被同一个框拦住。
+
+    这里选确认（而非「取消」）：目标任务就是要进去才能完成，取消等于放弃。
+    进去做完再由 _recover_to_panel 把淘宝拉回来。
 
     items 传入调用方已经拿到的识别结果，避免为了判断弹框再多截一次图。
     返回是否真的点过确认框。
@@ -253,7 +278,7 @@ def _recover_to_panel(context: Any, config: dict[str, Any], *, tries: int = 6) -
         # 确认框必须先于「在面板上」判断：它盖在面板上方，但面板文字依然能被识别，
         # 先判面板就会以为一切正常，然后不断点在弹框上。
         if panel.open_app_dialog_visible(items):
-            _confirm_open_app_dialog(context, items)
+            _open_app_dialog_action(context, items)
             _back(context)
             continue
 
@@ -322,6 +347,12 @@ def run_daily_loop(context: Any, config: dict[str, Any], *, max_rounds: int = DE
     # 就会把轮次全部耗在它身上。这里按任务名记执行次数，超过上限就放弃。
     tried: dict[str, int] = {}
     abandoned: set[str] = set()
+    # 每个任务上一次看到的 (x/y) 进度。判断「有没有推进」必须跟上一轮比，
+    # 只看 progress[0] > 0 会把所有带进度的任务当成永不放弃。
+    last_progress: dict[str, tuple[int, int]] = {}
+    # 整台手机上装了什么，用来挡掉「点了必然失败」的任务（例如本机没装今日头条）。
+    # 每轮只查一次，取不到就退回空集合（等于不挡任何任务）。
+    installed = _installed_packages(context)
 
     for round_index in range(1, max_rounds + 1):
         items = _scan(context)
@@ -345,7 +376,26 @@ def run_daily_loop(context: Any, config: dict[str, Any], *, max_rounds: int = DE
             # 刚恢复就被判定为"今日任务已完成"，直接结束整轮任务。
             continue
 
+        # 面板本身能判断"做完了"时不必再扫：主账号没有进度行，走 pick_task 兜底；
+        # 分身账号有「完成进度 n/m」，n>=m 即完成。
+        if completed and panel.overall_done(items):
+            progress = panel.overall_progress(items)
+            if progress is not None:
+                LOGGER.info("完成进度 %d/%d，今日任务已全部完成", *progress)
+            else:
+                LOGGER.info("面板上已无可执行任务，今日任务已全部完成")
+            return True
+
         pick = panel.pick_task(items, config, exclude=abandoned)
+        if pick.item is not None and installed and panel.task_unreachable(pick.item.text, installed):
+            package = panel.required_package(pick.item.text)
+            LOGGER.warning(
+                "任务「%s」要跳 %s，这台手机上没装这个应用，跳过",
+                pick.item.text,
+                package,
+            )
+            abandoned.add(panel.task_key(pick.item.text))
+            continue
         if pick.item is None:
             if pick.skipped:
                 LOGGER.info("本轮不可执行项：%s", ", ".join(pick.skipped))
@@ -384,7 +434,7 @@ def run_daily_loop(context: Any, config: dict[str, Any], *, max_rounds: int = DE
             LOGGER.warning("任务后未能回到任务面板")
 
         tried[name] = tried.get(name, 0) + 1
-        if _progress_stuck(context, name, tried[name], max_attempts):
+        if _progress_stuck(context, name, tried[name], max_attempts, last_progress):
             abandoned.add(name)
             LOGGER.warning(
                 "任务「%s」已尝试 %d 次仍无进展，本次跳过它", name, tried[name]
@@ -396,15 +446,25 @@ def run_daily_loop(context: Any, config: dict[str, Any], *, max_rounds: int = DE
     return True
 
 
-def _progress_stuck(context: Any, name: str, attempts: int, max_attempts: int) -> bool:
+def _progress_stuck(
+    context: Any,
+    name: str,
+    attempts: int,
+    max_attempts: int,
+    last_progress: dict[str, tuple[int, int]],
+) -> bool:
     """判断某个任务是否该放弃。
 
-    任务名里带 (x/y) 进度时以进度为准：涨了就继续，没涨且已达上限就放弃。
+    任务名里带 (x/y) 进度时以「进度有没有真正增长」为准：跟上一轮的值比，
+    变大了算有进展并刷新记录，没变大且已达尝试上限就放弃。
     不带进度时（例如「点击去逛+30」）只能看执行次数，到上限就放弃。
     """
     progress = _find_progress(context, name)
-    if progress is not None and progress[0] > 0:
-        return False
+    if progress is not None:
+        previous = last_progress.get(name)
+        last_progress[name] = progress
+        if previous is not None and progress[0] > previous[0]:
+            return False
     return attempts >= max_attempts
 
 

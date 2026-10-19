@@ -93,6 +93,9 @@ def normalize_text(text: Any) -> str:
 
 _PROGRESS_RE = re.compile(r"[(（]\s*(\d+)\s*/\s*(\d+)\s*[)）]")
 
+# 面板顶部的「完成进度 20/20」不带括号，单独用一个宽松正则。
+_OVERALL_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
+
 # OCR 常把数字认成形近字母：「去蚂蚁庄园逛逛哟(0/1)」会被识别成 (O/1)，
 # 于是同一个任务在日志和去重里被当成两个不同任务，白白多跑两轮。
 _SHAPE_MAP = str.maketrans({"O": "0", "o": "0", "I": "1", "l": "1", "|": "1"})
@@ -213,7 +216,89 @@ TEAM_PAGE_MARKERS = (
     "组队完成",
 )
 
-# 淘金币赛车首页的特征词。与任务面板的区别：首页有「赚能量」和「升级赛车」，
+# 任务名里出现这些字样时，说明要点「打开」跳外部应用。
+# 判断依据是**这台手机上装没装**，不是当前登录账号装没装 ——
+# 应用分身只是把淘宝克隆了一份，本机应用是共用的；分身里点头条/支付宝
+# 依然会拉起主账号的那个应用。所以这里只挡「整台手机都没有」的任务
+# （例如本机没装今日头条，点下去必失败），装了的一律照常去做。
+# 键是任务名里的关键词，值是对应的应用包名。
+OFFSITE_APPS = {
+    "蚂蚁庄园": "com.eg.android.AlipayGphone",
+    "蚂蚁森林": "com.eg.android.AlipayGphone",
+    "支付宝": "com.eg.android.AlipayGphone",
+    "闲鱼": "com.taobao.idlefish",
+    "今日头条": "com.ss.android.article.news",
+    "头条": "com.ss.android.article.news",
+    "百度": "com.baidu.searchbox",
+    "快手": "com.smile.gifmaker",
+}
+
+# 任务名里出现这些字样时，说明要走浏览器打开外部网页，
+# 只需要浏览器，任何手机都有。
+BROWSER_JUMP_MARKERS = ("去逛", "逛一逛", "浏览会场", "看直播")
+
+
+def required_package(task_text: str) -> str | None:
+    """这个任务要点「打开」跳哪个应用；不需要外部应用时返回 None。
+
+    用于在整台手机都没装该应用时提前跳过，避免点下去弹框、等待、再白跑一轮。
+    """
+    text = normalize_text(task_text)
+    for marker, package in OFFSITE_APPS.items():
+        if marker in text:
+            return package
+    return None
+
+
+def task_unreachable(task_text: str, installed: Collection[str]) -> bool:
+    """任务要跳的应用整台手机都没有 —— 这个任务注定完不成。
+
+    installed 必须是**本机全量**包名（不带 --user 查询），不能传某个账号的包名，
+    否则装了支付宝的分身也会被误判成完不成。传空集合表示「查询失败，不知道」，
+    这时一律返回 False —— 宁可直接做，也不能把所有任务都当掉。
+    """
+    package = required_package(task_text)
+    if package is None or not installed:
+        return False
+    return package not in installed
+
+
+def overall_progress(items: Iterable[OcrItem]) -> tuple[int, int] | None:
+    """读面板顶部的「完成进度 n/m」，没有这一行时返回 None。
+
+    主账号的面板**没有**进度行（只能看到下面任务全做完后领一个总金币），
+    分身账号的面板才有。所以它只能作为「已完成」的充分条件，不能当必要条件。
+
+    这行的写法不带括号（「完成进度 20/20」），跟任务名里的 (3/5) 不同，
+    所以不能直接复用 task_progress 的括号正则。
+    """
+    for item in items:
+        if "完成进度" not in task_key(item.text):
+            continue
+        progress = task_progress(item.text)
+        if progress is not None:
+            return progress
+        match = _OVERALL_RE.search(task_key(item.text))
+        if match:
+            return int(match.group(1)), int(match.group(2))
+    return None
+
+
+def overall_done(items: Iterable[OcrItem]) -> bool:
+    """从面板本身看，今日是否已经全部做完。
+
+    只认「完成进度 n/m 且 n >= m」这一条证据，也就是分身账号面板顶部那行。
+
+    刻意**不**把「当前屏没有可执行任务」当成完成的证据：任务面板是可以下滑的，
+    停在中间时下面的任务根本不在截图里，用这条判断会提前结束。
+    没有进度行时（主账号的面板）交给主循环向上滑回顶部复查，靠连续空轮判定结束，
+    那条路径本来就是安全的。
+    """
+    progress = overall_progress(items)
+    return progress is not None and progress[1] > 0 and progress[0] >= progress[1]
+
+
+# 淘金币首页的特征词。与任务面板的区别：首页有「赚能量」和「升级赛车」，
 # 面板则是「赚金币抵钱」「完成进度」。在首页按返回键会直接退出淘金币，
 # 所以必须改点「赚金币」重新打开面板。
 COIN_HOME_MARKERS = (
