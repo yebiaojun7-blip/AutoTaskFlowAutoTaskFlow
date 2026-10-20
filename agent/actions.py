@@ -81,6 +81,63 @@ def _swipe_up(context: Any, *, delay: float = 1.0) -> None:
     _sleep(delay)
 
 
+# 清单 / 会场 / 课堂这类页面靠滑动触发加载，页面静止不动就不再计时长，
+# 所以停留期间要定时上下滑一下。
+_SCROLL_INTERVAL = 5.0
+# 单次滑动只用屏幕中间一段，留在内容区里：贴边滑会触发下拉刷新或被当成返回手势。
+_SCROLL_TOP = 0.32
+_SCROLL_BOTTOM = 0.68
+
+
+def _scroll_once(context: Any, *, upward: bool = True) -> None:
+    """在页面内容区滑一小段；上下来回滑，位置不会越滑越远。"""
+    width, height = _screen_size(context)
+    x = width // 2
+    top = int(height * _SCROLL_TOP)
+    bottom = int(height * _SCROLL_BOTTOM)
+    if upward:
+        _controller(context).post_swipe(x, bottom, x, top, 500).wait()
+    else:
+        _controller(context).post_swipe(x, top, x, bottom, 500).wait()
+    _sleep(0.5)
+
+
+def _dwell(context: Any, seconds: float, *, scroll: bool) -> None:
+    """在目标页停留指定秒数；需要滑动的页面边滑边等。"""
+    if seconds <= 0:
+        return
+    if not scroll:
+        _sleep(seconds)
+        return
+    remaining = seconds
+    upward = True
+    while remaining > 0:
+        chunk = min(_SCROLL_INTERVAL, remaining)
+        _sleep(chunk)
+        remaining -= chunk
+        if remaining > 0:
+            _scroll_once(context, upward=upward)
+            upward = not upward
+
+
+def _job_succeeded(job: Any) -> bool:
+    """判断一个 maa 作业是否成功。
+
+    `Job.succeeded` 在不同版本里是 property 也可能是方法，两种都要认。
+    判不出来时按「未知 → 当作失败」处理：shell 能力是可选能力，把没执行当成
+    执行成功会让上层拿到一个空字符串继续往下跑，错误被推到很远的地方才暴露。
+    """
+    value = getattr(job, "succeeded", None)
+    if value is None:
+        return False
+    if callable(value):
+        try:
+            value = value()
+        except Exception:  # noqa: BLE001 - 判定本身出错时按失败处理
+            return False
+    return bool(value)
+
+
 def _shell(context: Any, command: str) -> str | None:
     """执行一条 shell 命令；控制器没有 shell 能力时返回 None。
 
@@ -95,8 +152,10 @@ def _shell(context: Any, command: str) -> str | None:
         job.wait()
     except Exception:  # noqa: BLE001 - 控制器不支持时可能直接抛，当作没有 shell
         return None
-    succeeded = getattr(job, "succeeded", None)
-    if callable(succeeded) and not succeeded():
+    # maa 的 Job.succeeded 是 property，不是方法：写成 succeeded() 会 TypeError，
+    # 而判 callable 再调用会静默跳过这次检查，把「作业失败」当成「执行成功但没输出」，
+    # 于是 am start 没生效也被当作启动成功，任务一路跑到截图才发现淘宝根本没在前台。
+    if not _job_succeeded(job):
         return None
     try:
         return str(job.get() or "")
@@ -135,7 +194,8 @@ def _run_search(context: Any, keyword: str, config: dict[str, Any], image: Any) 
     else:
         LOGGER.info("未定位到搜索框，仅停留后返回")
 
-    _sleep(panel.action_duration("jump", config))
+    # 搜索结果页同样要滑动才算浏览，静止停留不计时长。
+    _dwell(context, panel.action_duration("jump", config), scroll=True)
     _back(context)
 
 
@@ -159,7 +219,8 @@ def _run_task(context: Any, pick: panel.PanelPick, config: dict[str, Any], butto
 
     duration = panel.action_duration(kind, config)
     LOGGER.info("任务类型 %s，停留 %.1f 秒", kind, duration)
-    _sleep(duration)
+    # 浏览类和跳转到的会场页都是靠滑动才继续累计，静止等待等于白等。
+    _dwell(context, duration, scroll=kind in ("browse", "jump"))
     _back(context)
 
 
@@ -207,9 +268,13 @@ def start_app(context: Any, config: dict[str, Any], user_id: int | None = None) 
 
     LOGGER.warning("当前控制器没有 shell 能力，改用框架 StartApp 启动 %s", package)
     try:
-        _controller(context).post_start_app(package).wait()
+        job = _controller(context).post_start_app(package)
+        job.wait()
     except Exception as exc:  # noqa: BLE001 - 起不来就显式失败，让 Pipeline 中止
         LOGGER.error("启动应用失败：%s", exc)
+        return False
+    if not _job_succeeded(job):
+        LOGGER.error("框架 StartApp 启动 %s 失败，目标应用没有起来", package)
         return False
     return True
 
@@ -591,6 +656,23 @@ def register(agent_server: Any) -> None:
                 LOGGER.error("读取任务配置失败：%s", exc)
                 return False
             return open_coin_page(context, config)
+
+    @agent_server.custom_action("taobao_abort")
+    class TaobaoAbort(CustomAction):
+        """显式中止，并把这次运行标记为失败。
+
+        为什么要这个动作：`StopTask` 只是停下，任务收尾一律 `Succeeded`。
+        于是「淘宝没拉起来、任务面板一次都没进」这种彻底空转，看起来和
+        「今日任务已完成」一模一样。这里返回 False 让节点失败，整轮运行
+        才会是 Failed —— 出问题的时候必须是红的。
+
+        custom_action_param 的 reason 会被记进日志，用来区分中止原因。
+        """
+
+        def run(self, context: Context, argv: Any) -> bool:
+            reason = str(_parse_params(argv).get("reason") or "流程中止")
+            LOGGER.error("任务中止：%s", reason)
+            return False
 
     @agent_server.custom_action("taobao_daily_loop")
     class TaobaoDailyLoop(CustomAction):

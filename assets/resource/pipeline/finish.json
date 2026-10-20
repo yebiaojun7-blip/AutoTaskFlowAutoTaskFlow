@@ -31,7 +31,10 @@
   },
   "AbortTask": {
     "recognition": "DirectHit",
-    "action": "StopTask",
-    "post_delay": 500
+    "action": "Custom",
+    "custom_action": "taobao_abort",
+    "custom_action_param": {
+      "reason": "进不去淘金币任务面板"
+    }
   }
 }

@@ -10,15 +10,25 @@
     "custom_action": "taobao_open_coin_page",
     "post_delay": 1500,
     "next": ["WaitCoinPanel"],
-    "on_error": ["DailyTaskLoop"]
+    "on_error": ["AbortTask"]
   },
   "WaitCoinPanel": {
     "recognition": "OCR",
-    "expected": ["赚金币抵钱", "完成进度", "去完成", "今日累计奖励", "领取奖励", "立即领取"],
+    "expected": [
+      "赚金币抵钱",
+      "完成进度",
+      "今日累计奖励",
+      "完成下方任务得额外金币",
+      "任务到访得金币",
+      "淘金币趣味课堂",
+      "逛清单",
+      "搜一搜你心仪的宝贝",
+      "拍立淘逛感兴趣的宝贝"
+    ],
     "action": "DoNothing",
     "pre_delay": 1500,
     "timeout": 15000,
     "next": ["DailyTaskLoop"],
-    "on_error": ["DailyTaskLoop"]
+    "on_error": ["AbortTask"]
   }
 }

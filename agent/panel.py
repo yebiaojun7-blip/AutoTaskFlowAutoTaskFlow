@@ -16,23 +16,45 @@ from agent.custom import TaskDecision, classify_task, load_config
 EXECUTABLE_KINDS = ("search", "jump", "browse")
 
 # 任务面板的特征词，用于判断"当前是否还停留在淘金币任务面板"。
-# 真机（一加 Ace 3 / 淘宝 双11版）实测：面板标题为「赚金币抵钱」，
-# 首屏一定能看到「今日累计奖励」与「完成进度 x/20」。
+#
+# 面板文案会随淘宝版本漂移，所以新旧两套都留：任一套命中 PANEL_MIN_HITS 个即可。
+#
+# 旧版（此前唯一支持的版本）：赚金币抵钱 / 今日累计奖励 / 完成进度 x/20
+#
+# 新版（一加 Ace 3 PJE110 / 淘宝 2026-10）实测：
+#   今日速赚570淘金币 / 为你找到最简单的任务，2分钟即可完成
+#   完成下方任务得额外金币 / 任务到访得金币
+#   逛清单，每15秒30金币(0/2) / 搜一搜你心仪的宝贝(0/3) / 淘金币趣味课堂
+#   去蚂蚁庄园逛逛哟 / 去芭芭农场逛一逛 / 拍立淘逛感兴趣的宝贝(0/5)
+# 这版面板上旧词**一个都不出现**，只认旧词会让 task_panel_visible() 永远为 False，
+# 主循环于是拼命按返回键、点关闭按钮，在同一页面死转十几分钟。
 #
 # 注意不要把「立即领取」「领取奖励」「去完成」这类通用按钮词放进来：
 # 淘宝首页和促销浮层上也有「立即领取」，只命中一个词就会把首页误判成面板，
 # 于是主循环把首页的「搜索」框当成搜索任务去点（实测点了 (629,190) 十几次）。
+#
+# 「今日速赚」刻意不放进来：任务全做完后的弹窗标题也是「今日速赚570淘金币」，
+# 它必须只靠 DAILY_DONE_MARKERS 判定，混进面板特征词会让弹窗被当成面板。
 PANEL_MARKERS = (
+    # 旧版面板
     "赚金币抵钱",
     "今日累计奖励",
     "完成进度",
+    # 新版面板
+    "完成下方任务得额外金币",
+    "任务到访得金币",
+    "淘金币趣味课堂",
+    "逛清单",
+    "搜一搜你心仪的宝贝",
+    "拍立淘逛感兴趣的宝贝",
 )
 
 # 面板至少要命中这么多个特征词才算"在面板"。单个弱特征不足以判定。
 PANEL_MIN_HITS = 2
 
-# 可点击的按钮文案。任务名在左侧、按钮在右侧同一行，所以点击应打在按钮上。
-# 实测本机型上同一面板会混用「去完成」「去逛逛」「逛一逛」「领取奖励」。
+# 可点击的按钮文案。任务名在上、按钮在下一行，两者左对齐。
+# 实测本机型的面板会混用「浏览5秒」「浏览15秒」「参与答题」「点击去逛」
+# 「每日来任务面板」，都带变动的数字或动词，只能按前缀匹配。
 DEFAULT_ACTION_BUTTONS = (
     "去完成",
     "立即完成",
@@ -46,6 +68,13 @@ DEFAULT_ACTION_BUTTONS = (
 
 # 同一行文字的纵坐标容差（像素），用于把 OCR 结果还原成阅读顺序。
 ROW_TOLERANCE = 20
+
+# 同一行任务名与右侧按钮允许的纵坐标差（像素）。实测 0~27：
+# 「任务到访得金币」的 +10 几乎平齐，「逛清单」的 +60 差 27，所以不能只给 20。
+ACTION_BUTTON_DY = 45
+
+# 任务行右侧金币按钮的文字形式（「+90」「+60」），面板上就是它本身可点。
+_REWARD_RE = re.compile(r"\+\s*\d+")
 
 
 @dataclass(frozen=True)
@@ -112,6 +141,21 @@ def task_progress(text: str) -> tuple[int, int] | None:
     if not match:
         return None
     return int(match.group(1)), int(match.group(2))
+
+
+# 任务名下方那行灰色说明文字。真机（一加 Ace 3）实测每行任务的结构是：
+#     任务名      「搜一搜你心仪的宝贝(0/3)」
+#     说明文字    「浏览15秒」
+# 说明文字本身不是任务，但它可能命中名单词（「点击去逛」就在 jump_tasks 里），
+# 一旦被当成任务挑走，就会去点它的中心坐标——那里是纯文本，点下去毫无反应。
+_SUBTITLE_RE = re.compile(
+    r"^(?:浏览\d+秒|参与答题|点击去逛|每日来.{0,8}|去完成|立即完成|已领取|已完成)$"
+)
+
+
+def is_subtitle(text: str) -> bool:
+    """这条 OCR 文本是否是任务名下方的说明文字（不是任务本身）。"""
+    return _SUBTITLE_RE.match(task_key(text)) is not None
 
 
 def _field(raw: Any, name: str, default: Any = None) -> Any:
@@ -447,6 +491,11 @@ def pick_task(
     allowed = tuple(kinds) if kinds else EXECUTABLE_KINDS
     skipped: list[str] = []
     for item in items:
+        # 说明文字（「浏览15秒」「参与答题」「点击去逛」）不是任务，
+        # 它就在任务名正下方，且「点击去逛」本身还命中 jump_tasks 名单，
+        # 不排除就会被当成任务挑走，点它只是点在纯文本上。
+        if is_subtitle(item.text):
+            continue
         text = task_key(item.text)
         if text in exclude:
             skipped.append(f"{item.text}(已放弃)")
@@ -463,29 +512,59 @@ def find_action_button(
     target: OcrItem,
     buttons: Sequence[str] = DEFAULT_ACTION_BUTTONS,
 ) -> OcrItem | None:
-    """在同一行内找到任务名右侧的可点击按钮，点击坐标应打在按钮上。
+    """找到任务名对应行的可点击按钮，点击坐标应打在按钮上。
 
-    OCR 通常把"浏览商品"和"去完成"识别成两个独立文字块。若整行文字本身
-    就含有"去完成"（某些界面会合并成一条），直接返回该文字块。
+    真机（一加 Ace 3）实测一行任务的结构是：左边任务名，名字下方一行灰色小字
+    （「浏览15秒」「参与答题」「点击去逛」—— 这些是**说明文字，不是按钮**），
+    右边是本行真正的按钮：一个黄色金币，文字只有「+90」「+60」这种。
+
+    所以命中条件有两条，缺一不可：
+        1. 起点在任务名右边缘之外 —— 顶部「+180 额外得」那个汇总金币在 x=325，
+           而「逛清单」名字右边缘在 x=501，靠它把汇总金币排除掉；
+        2. 纵向偏移在 ACTION_BUTTON_DY 以内 —— 实测金币相对任务名的 dy 为 9~27，
+           原来的 ROW_TOLERANCE=20 太小，「逛清单」的 +60（dy=27）就漏掉了。
+
+    找不到时返回 None，调用方会退化成点击任务名本身（整行卡片可点）。
     """
+    name_right = target.x + target.width
+    best: OcrItem | None = None
+    best_dy = 0
+    for item in items:
+        if item is target or item.x < name_right:
+            continue
+        dy = abs(item.y - target.y)
+        if dy > ACTION_BUTTON_DY:
+            continue
+        if not (_is_action_text(item.text, buttons) or _is_reward_badge(item.text)):
+            continue
+        if best is None or dy < best_dy:
+            best = item
+            best_dy = dy
+    if best is not None:
+        return best
+
+    # 右侧没有找到按钮时，才考虑「按钮文案被并进了任务名」这种情况。
+    # 顺序不能反：任务名「去芭芭农场逛一逛」里就含名单词「逛一逛」，
+    # 先做包含匹配会把它自己当成按钮返回，右侧真正的 +30 反而永远找不到。
     for button in buttons:
         normalized = normalize_text(button)
         if normalized and normalized in target.text:
             return target
+    return None
 
-    best: OcrItem | None = None
-    for item in items:
-        if item is target or abs(item.y - target.y) > ROW_TOLERANCE:
-            continue
-        if item.x <= target.x:
-            continue
-        for button in buttons:
-            normalized = normalize_text(button)
-            if normalized and normalized in item.text:
-                if best is None or item.x < best.x:
-                    best = item
-                break
-    return best
+
+def _is_action_text(text: str, buttons: Sequence[str]) -> bool:
+    """文字是否命中任一按钮文案。"""
+    normalized = normalize_text(text)
+    return any(word and normalize_text(word) in normalized for word in buttons)
+
+
+def _is_reward_badge(text: str) -> bool:
+    """是否是任务行右侧的金币金额块（「+90」「+60」）。
+
+    面板上每行的按钮就是这枚金币，文字里没有动词可匹配，只能按「+数字」认。
+    """
+    return _REWARD_RE.fullmatch(normalize_text(text)) is not None
 
 
 def search_keyword(config: dict[str, Any], attempt: int = 0) -> str:

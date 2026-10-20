@@ -7,7 +7,14 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
+
+# 以脚本路径启动时 sys.path[0] 是 agent/ 自身，`from agent import ...` 找不到包；
+# 把 PI 根目录（agent/ 的上一级）补进去，脚本方式和 -m 方式都能跑
+_PI_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PI_ROOT not in sys.path:
+    sys.path.insert(0, _PI_ROOT)
 
 
 def _setup_logging() -> None:

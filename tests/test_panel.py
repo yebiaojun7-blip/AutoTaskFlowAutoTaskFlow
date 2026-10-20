@@ -164,6 +164,39 @@ DONE_ONLY = [
     text_item("已领取", 100, 300),
 ]
 
+# 真机（一加 Ace 3 PJE110 / 淘宝 2026-10）实测的整屏 OCR 结果，坐标原样抄自日志。
+# 这版面板文案与旧版完全不同，是回归测试的基准：任务名在左、右侧金币按钮
+# 「+90」才是可点区域，任务名下方的「浏览15秒」等只是说明文字。
+DEVICE_PANEL = [
+    text_item("今日速赚570淘金币", 28, 188, 377, 47),
+    text_item("为你找到最简单的任务，2分钟即可完成", 32, 240, 400, 24),
+    text_item("完成下方任务得额外金币", 45, 313, 252, 23),
+    text_item("+180", 594, 325, 60, 31),
+    text_item("额外得", 596, 363, 58, 24),
+    text_item("任务到访得金币", 130, 447, 202, 33),
+    text_item("每日来任务面板", 130, 488, 165, 28),
+    text_item("+10", 605, 460, 45, 33),
+    text_item("逛清单，每15秒30金币(0/2)", 128, 580, 371, 37),
+    text_item("+60", 599, 607, 50, 33),
+    text_item("运动装备焕新", 146, 745, 144, 28),
+    text_item("精明囤货清单", 332, 745, 143, 28),
+    text_item("搜一搜你心仪的宝贝(0/3)", 130, 849, 329, 33),
+    text_item("浏览15秒", 128, 891, 98, 29),
+    text_item("+90", 602, 862, 53, 32),
+    text_item("淘金币趣味课堂", 130, 990, 204, 33),
+    text_item("参与答题", 128, 1027, 100, 35),
+    text_item("+30", 604, 1004, 51, 32),
+    text_item("去蚂蚁庄园逛逛哟", 131, 1133, 230, 28),
+    text_item("点击去逛", 128, 1171, 98, 30),
+    text_item("+50", 602, 1145, 53, 31),
+    text_item("去芭芭农场逛一逛", 131, 1273, 232, 28),
+    text_item("浏览5秒", 126, 1310, 92, 34),
+    text_item("+30", 601, 1282, 56, 38),
+    text_item("拍立淘逛感兴趣的宝贝(0/5)", 130, 1412, 358, 33),
+    text_item("浏览5秒", 128, 1452, 88, 29),
+    text_item("+20", 604, 1425, 51, 33),
+]
+
 
 class PanelParseTest(unittest.TestCase):
     def test_reading_order_sorts_by_row_then_column(self) -> None:
@@ -203,6 +236,78 @@ class PanelParseTest(unittest.TestCase):
         items = panel.parse_ocr_items(PANEL_ROW)
         self.assertIsNotNone(panel.find_text_by_keywords(items, ("搜索", "去完成")))
         self.assertIsNone(panel.find_text_by_keywords(items, ("不存在的词",)))
+
+
+class DevicePanelTest(unittest.TestCase):
+    """真机面板布局的回归测试：任务名在左，右侧金币按钮才是可点区域。"""
+
+    def setUp(self) -> None:
+        self.items = panel.parse_ocr_items(DEVICE_PANEL)
+        self.config = load_config()
+
+    def test_panel_is_recognised(self) -> None:
+        self.assertTrue(panel.task_panel_visible(self.items))
+
+    def test_panel_text_does_not_contain_retired_markers(self) -> None:
+        """旧版三个特征词一个都不在屏上，靠它们判定会永远认不出面板。"""
+        texts = "".join(item.text for item in self.items)
+        self.assertNotIn("赚金币抵钱", texts)
+        self.assertNotIn("今日累计奖励", texts)
+        self.assertNotIn("完成进度", texts)
+
+    def test_daily_done_panel_is_not_taken_as_task_panel(self) -> None:
+        """「今日速赚」是完成弹窗和面板共用的标题，不能作为面板特征词。"""
+        self.assertNotIn("今日速赚", panel.PANEL_MARKERS)
+
+    def test_subtitle_is_not_picked_as_task(self) -> None:
+        """「点击去逛」命中 jump_tasks 名单，但它只是任务名下方的说明文字。"""
+        pick = panel.pick_task(self.items, self.config)
+        self.assertIsNotNone(pick.item)
+        assert pick.item is not None
+        self.assertNotEqual(pick.item.text, "点击去逛")
+        self.assertNotIn("点击去逛", pick.item.text)
+
+    def test_first_task_offscreen_order(self) -> None:
+        """按阅读顺序应挑到最上面那个可执行任务。"""
+        pick = panel.pick_task(self.items, self.config)
+        self.assertIsNotNone(pick.item)
+        assert pick.item is not None
+        self.assertEqual(pick.item.text, "任务到访得金币")
+
+    def test_button_is_the_coin_badge_on_the_right(self) -> None:
+        pick = panel.pick_task(self.items, self.config)
+        assert pick.item is not None
+        button = panel.find_action_button(self.items, pick.item)
+        self.assertIsNotNone(button)
+        assert button is not None
+        self.assertEqual(button.text, "+10")
+
+    def test_each_task_row_finds_its_own_badge(self) -> None:
+        """每一行的金币必须跟该行对齐，不能串到别的行。"""
+        expected = {
+            "逛清单，每15秒30金币(0/2)": "+60",
+            "搜一搜你心仪的宝贝(0/3)": "+90",
+            "淘金币趣味课堂": "+30",
+            "去蚂蚁庄园逛逛哟": "+50",
+            "去芭芭农场逛一逛": "+30",
+            "拍立淘逛感兴趣的宝贝(0/5)": "+20",
+        }
+        for name, badge in expected.items():
+            task = panel.find_text_by_keywords(self.items, (name,))
+            self.assertIsNotNone(task, name)
+            assert task is not None
+            button = panel.find_action_button(self.items, task)
+            self.assertIsNotNone(button, name)
+            assert button is not None
+            self.assertEqual(button.text, badge, name)
+
+    def test_summary_badge_is_not_used_as_button(self) -> None:
+        """顶部「+180 额外得」是汇总金币，不能当成任何一行的按钮。"""
+        task = panel.find_text_by_keywords(self.items, ("任务到访得金币",))
+        assert task is not None
+        button = panel.find_action_button(self.items, task)
+        assert button is not None
+        self.assertNotEqual(button.text, "+180")
 
 
 class PickTaskTest(unittest.TestCase):
@@ -323,6 +428,74 @@ class DailyLoopTest(unittest.TestCase):
         result = actions.run_daily_loop(context, fast_config(), max_rounds=2)
         self.assertTrue(result)
         self.assertLessEqual(len(context.controller.clicks), 2)
+
+
+class DwellScrollTest(unittest.TestCase):
+    """清单 / 会场 / 课堂这类页面静止不动就不再计时长，停留期间必须滑动。"""
+
+    def _slow_config(self, kind_seconds: float = 12) -> dict:
+        config = fast_config()
+        config["timing"]["browse_duration_seconds"] = kind_seconds
+        config["timing"]["jump_duration_seconds"] = kind_seconds
+        return config
+
+    def test_browse_dwell_scrolls_while_waiting(self) -> None:
+        context = FakeContext([PANEL_ROW, DONE_ONLY, DONE_ONLY])
+        original = actions._sleep
+        actions._sleep = lambda seconds: None
+        try:
+            actions.run_daily_loop(context, self._slow_config(), max_rounds=1)
+        finally:
+            actions._sleep = original
+
+        # 停留 12 秒 = 两次 5 秒的间隔，至少要滑一次，且上下来回而非同一方向。
+        swipes = context.controller.swipes
+        self.assertTrue(swipes)
+        directions = {(y1 > y2) for _, y1, _, y2 in swipes}
+        self.assertEqual(directions, {True, False})
+
+    def test_short_dwell_does_not_scroll(self) -> None:
+        """停留时间不足一个间隔时不滑动，避免为极短任务浪费一次手势。"""
+        context = FakeContext([PANEL_ROW, DONE_ONLY, DONE_ONLY])
+        original = actions._sleep
+        actions._sleep = lambda seconds: None
+        try:
+            actions.run_daily_loop(context, self._slow_config(3), max_rounds=1)
+        finally:
+            actions._sleep = original
+
+        self.assertEqual(context.controller.swipes, [])
+
+    def test_search_dwell_scrolls_results_page(self) -> None:
+        search_panel = [
+            text_item("赚金币抵钱", 100, 150, 300, 48),
+            text_item("今日累计奖励", 100, 220, 240, 40),
+            text_item("搜索商品", 100, 300),
+            text_item("去完成", 900, 300, 120, 40),
+        ]
+        search_box = [text_item("搜索", 300, 120, 400, 60)]
+        context = FakeContext([search_panel, search_box, DONE_ONLY, DONE_ONLY])
+        original = actions._sleep
+        actions._sleep = lambda seconds: None
+        try:
+            actions.run_daily_loop(context, self._slow_config(), max_rounds=1)
+        finally:
+            actions._sleep = original
+
+        # 关键词搜索后停在结果页，同样要滑。
+        self.assertTrue(context.controller.swipes)
+
+    def test_dwell_without_scroll_still_waits(self) -> None:
+        """不需要滑动的场景（如只看弹窗）应保持原样，不额外发手势。"""
+        context = FakeContext([PANEL_ROW])
+        original = actions._sleep
+        actions._sleep = lambda seconds: None
+        try:
+            actions._dwell(context, 6, scroll=False)
+        finally:
+            actions._sleep = original
+
+        self.assertEqual(context.controller.swipes, [])
 
 
 TEAM_PAGE = [
