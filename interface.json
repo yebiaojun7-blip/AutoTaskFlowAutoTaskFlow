@@ -3,6 +3,7 @@
     "name": "AutoTaskFlow",
     "version": "0.3.0",
     "description": "淘宝淘金币日常任务自动化（MaaFramework + 纯截图 OCR）",
+    "github": "https://github.com/yebiaojun7-blip/AutoTaskFlowAutoTaskFlow",
     "controller": [
         {
             "name": "Android",
