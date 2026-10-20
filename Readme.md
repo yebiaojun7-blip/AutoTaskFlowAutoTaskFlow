@@ -258,7 +258,30 @@ $env:PI_PROFILE = "d:/path/to/pi-profile.yaml"
 .\gradlew.bat :app:assembleRelease
 ```
 
+两个出包的坑：
+
+- **Agent 运行时的内核版本必须和 `.maafw/` 里的 `.so` 一致。** `build_agent_bundle.py` 有自己的默认版本（会静默丢掉 `requirements.txt` 里的 `MaaFw==` 钉版），版本对不上时内核加载失败。生成 `.so` 时记下版本，用 `--core-tag 3.13.15-maafw<同版本>` 显式对齐。当前是 `3.13.15-maafw5.14.3`。
+- **不要用 `--depth 1` 克隆 MaaFwApp。** 它的 `versionName`/`versionCode` 是从 git tag 和提交数推出来的：浅克隆里提交数恒为 1、tag 一个都没有，`versionName` 会退化成 `bc55dac` 这类裸哈希，应用内「检查更新」直接报版本号无法解析。克隆后用 `git fetch --unshallow` 补全，或在 `local.properties` 里固定 `build.versionName=<x.y.z>`（`versionCode` 没有覆盖入口，只能靠完整历史）。
+
 装好后：给通知和电池白名单权限 → 在应用里选 Shizuku（或 root）并授权 → 选服务器 → 勾任务 → 开跑。
+
+#### 授权按钮点了没反应
+
+Shizuku 的授权对话框由 Shizuku 应用弹出，而它只有在**服务已经跑起来**的时候才会弹。应用里那个「请求权限」按钮在 `Shizuku.pingBinder()` 失败时直接返回 false，**不弹任何提示** —— 所以在服务没启动的情况下，表现就是点了没反应。
+
+先确认服务在不在：
+
+```powershell
+adb shell ps -A | findstr /i shizuku     # 没有任何输出 = 服务没运行
+```
+
+没有输出就说明要先把 Shizuku 服务启动起来（无 root 的机器只能走无线调试）：
+
+1. 设置 → 开发者选项 → 打开**无线调试**（Android 11+，需要连 Wi-Fi）
+2. 打开 Shizuku 应用 → 「通过无线调试启动」→ 配对（配对码在无线调试页的「使用配对码配对设备」里）→ 启动
+3. 启动成功后再回本应用点「请求权限」，这次 Shizuku 会正常弹授权框
+
+应用检测到服务未运行时会显示「Shizuku 未运行」，那个按钮只是帮你打开 Shizuku 应用，**不会替你启动服务**。另外 MaaMeow 之类能用，是因为它跑之前 Shizuku 服务已经被启动过了 —— 这是 Shizuku 本身的前置条件，不是本应用的问题。
 
 ### 手机上的配置界面
 
