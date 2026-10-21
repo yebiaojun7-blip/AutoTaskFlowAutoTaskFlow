@@ -34,12 +34,26 @@ class FakeJob:
         return self._value
 
 
+class FakeImage(int):
+    """假截图：既能当截图序号用，又带. shape 供手势坐标系读取。
+
+    run_recognition 用 `image if isinstance(image, int) else 0` 取屏幕序号，
+    所以这里继承 int 才能继续按序号映射 OCR 结果。
+    """
+
+    def __new__(cls, index: int, size: tuple[int, int]):
+        obj = super().__new__(cls, index)
+        obj.shape = (int(size[1]), int(size[0]), 3)
+        return obj
+
+
 class FakeController:
     def __init__(
         self,
         screens: list[list[dict]],
         size=(1280, 720),
         packages: list[str] | None = None,
+        frame_size=None,
     ) -> None:
         self.screens = screens
         self.index = 0
@@ -54,12 +68,16 @@ class FakeController:
         self.shell_supported = True
         self.foreground = "com.taobao.taobao"
         self.resolution = list(size)
+        # 截图尺寸与设备分辨率不是一回事：真机 1080x2376 缩到 720x1584。
+        self.frame_size = frame_size
         self.packages = packages
 
     def post_screencap(self) -> FakeJob:
         index = min(self.index, len(self.screens) - 1)
         self.index += 1
-        return FakeJob(index)
+        if self.frame_size is None:
+            return FakeJob(index)
+        return FakeJob(FakeImage(index, self.frame_size))
 
     def post_click(self, x, y, contact=0, pressure=1) -> FakeJob:  # noqa: ANN001
         self.clicks.append((int(x), int(y)))
@@ -99,11 +117,13 @@ class FakeController:
 class FakeContext:
     """把截图序号映射到预先安排好的 OCR 结果。"""
 
-    def __init__(self, screens: list[list[dict]], packages: list[str] | None = None) -> None:
+    def __init__(self, screens: list[list[dict]], packages: list[str] | None = None, frame_size=None) -> None:
         self.screens = screens
-        self.controller = FakeController(screens, packages=packages)
+        self.controller = FakeController(screens, packages=packages, frame_size=frame_size)
         self.tasker = SimpleNamespace(controller=self.controller)
         self.reco_entries: list[str] = []
+        # 帧尺寸是模块级缓存（真机上整轮任务共用一个坐标系），测试之间要清掉。
+        actions._FRAME_SIZE = None
 
     def run_recognition(self, entry, image, pipeline_override=None):  # noqa: ANN001
         self.reco_entries.append(entry)
@@ -448,11 +468,11 @@ class DwellScrollTest(unittest.TestCase):
         finally:
             actions._sleep = original
 
-        # 停留 12 秒 = 两次 5 秒的间隔，至少要滑一次，且上下来回而非同一方向。
+        # 停留 12 秒 = 两次 5 秒的间隔，至少要滑一次；只往上滑，不滑回看过的地方。
         swipes = context.controller.swipes
         self.assertTrue(swipes)
-        directions = {(y1 > y2) for _, y1, _, y2 in swipes}
-        self.assertEqual(directions, {True, False})
+        for _, y1, _, y2 in swipes:
+            self.assertGreater(y1, y2, f"应当是往上滑，实际 ({y1} -> {y2})")
 
     def test_short_dwell_does_not_scroll(self) -> None:
         """停留时间不足一个间隔时不滑动，避免为极短任务浪费一次手势。"""
@@ -496,6 +516,50 @@ class DwellScrollTest(unittest.TestCase):
             actions._sleep = original
 
         self.assertEqual(context.controller.swipes, [])
+
+    def test_swipe_uses_screencap_size_not_device_resolution(self) -> None:
+        """手势坐标要落在截图范围内，不能按设备分辨率算。
+
+        真机 1080x2376 的截图缩到了 720x1584。如果按设备分辨率算，
+        上滑起点 y 会超出截图底边，手势被当成从顶部按下，页面滑不动。
+        """
+        context = FakeContext([PANEL_ROW, DONE_ONLY, DONE_ONLY], frame_size=(720, 1584))
+        context.controller.resolution = [1080, 2376]
+        original = actions._sleep
+        actions._sleep = lambda seconds: None
+        try:
+            actions.run_daily_loop(context, self._slow_config(), max_rounds=1)
+        finally:
+            actions._sleep = original
+
+        swipes = context.controller.swipes
+        self.assertTrue(swipes)
+        for x1, y1, x2, y2 in swipes:
+            self.assertLess(x1, 720)
+            self.assertLess(x2, 720)
+            self.assertLess(y1, 1584)
+            self.assertLess(y2, 1584)
+            self.assertGreaterEqual(min(y1, y2), 0)
+
+    def test_swipe_starts_above_bottom_gesture_bar(self) -> None:
+        """滑动起点不能落到底部手势栏里。
+
+        屏幕底部约 8% 是系统手势导航条和淘宝底部标签栏，手指按在那里
+        会被当成返回/切页手势，整次滑动直接失效。
+        """
+        context = FakeContext([PANEL_ROW, DONE_ONLY, DONE_ONLY], frame_size=(720, 1584))
+        original = actions._sleep
+        actions._sleep = lambda seconds: None
+        try:
+            actions.run_daily_loop(context, self._slow_config(), max_rounds=1)
+            actions._swipe_up(context, delay=0)
+        finally:
+            actions._sleep = original
+
+        swipes = context.controller.swipes
+        self.assertTrue(swipes)
+        for _, y1, _, y2 in swipes:
+            self.assertLessEqual(max(y1, y2), int(1584 * 0.85))
 
 
 TEAM_PAGE = [
@@ -1055,6 +1119,69 @@ class ProgressTest(unittest.TestCase):
 
         self.assertTrue(result)
         self.assertGreaterEqual(len(context.controller.clicks), 3)
+
+
+class DwellRequirementTest(unittest.TestCase):
+    """停留时长必须够任务自己要求的秒数，否则进度不增长、任务白做一次。"""
+
+    def setUp(self) -> None:
+        self.items = panel.parse_ocr_items(DEVICE_PANEL)
+        self.config = load_config()
+
+    def test_seconds_written_in_task_name_are_read(self) -> None:
+        """「逛清单，每15秒30金币」的 15 秒就要求在这个页面上待够。"""
+        task = panel.find_text_by_keywords(self.items, ("逛清单",))
+        assert task is not None
+        self.assertEqual(panel.required_seconds(self.items, task), 15)
+
+    def test_seconds_written_in_the_subtitle_below_are_read(self) -> None:
+        """「浏览15秒」是任务名下方那行说明文字，秒数写在它里面。"""
+        task = panel.find_text_by_keywords(self.items, ("搜一搜你心仪的宝贝",))
+        assert task is not None
+        self.assertEqual(panel.required_seconds(self.items, task), 15)
+
+    def test_subtitle_of_another_row_is_not_used(self) -> None:
+        """每行上下都有「浏览5秒」，取错行会让停留时间凭空变成别的数字。"""
+        task = panel.find_text_by_keywords(self.items, ("去蚂蚁庄园逛逛哟",))
+        assert task is not None
+        # 它自己那行写的是「点击去逛」，没有秒数，不能借用邻居的 15 秒或 5 秒。
+        self.assertEqual(panel.required_seconds(self.items, task), 0)
+
+    def test_dwell_never_goes_below_the_required_seconds(self) -> None:
+        total = panel.dwell_seconds("browse", self.config, required=15)
+        self.assertGreater(total, 15)
+        # 没要求秒数时退回配置里的兜底值。
+        self.assertEqual(
+            panel.dwell_seconds("browse", self.config), 
+            float(self.config["timing"]["browse_duration_seconds"]),
+        )
+
+    def test_dwell_is_zero_for_kinds_without_page(self) -> None:
+        """搜索没有「目标停留页面」的固定时长语义，由 _run_search 单独处理。"""
+        self.assertEqual(panel.dwell_seconds("search", self.config, required=15), 0.0)
+
+    def test_configured_dwell_is_long_enough_for_a_fifteen_second_task(self) -> None:
+        """配置里的兜底时长本身就要能覆盖最常见的 15 秒任务。"""
+        self.assertGreaterEqual(
+            self.config["timing"]["browse_duration_seconds"], 15
+        )
+        self.assertGreaterEqual(self.config["timing"]["jump_duration_seconds"], 15)
+
+
+class DedupeKeyTest(unittest.TestCase):
+    """去重键不能带进度，否则同一任务每推进一格就换一次身份。"""
+
+    def test_progress_suffix_is_removed(self) -> None:
+        self.assertEqual(
+            panel.dedupe_key("逛清单，每15秒30金币(0/2)"),
+            panel.dedupe_key("逛清单，每15秒30金币(1/2)"),
+        )
+
+    def test_progress_does_not_leak_into_the_key(self) -> None:
+        self.assertNotIn("0/2", panel.dedupe_key("逛清单，每15秒30金币(0/2)"))
+
+    def test_task_without_progress_is_unchanged(self) -> None:
+        self.assertEqual(panel.dedupe_key("淘金币趣味课堂"), "淘金币趣味课堂")
 
 
 class OffsiteAppTest(unittest.TestCase):

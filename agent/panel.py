@@ -143,6 +143,16 @@ def task_progress(text: str) -> tuple[int, int] | None:
     return int(match.group(1)), int(match.group(2))
 
 
+def dedupe_key(text: str) -> str:
+    """去重用的任务键：在 task_key 基础上去掉末尾的进度标记。
+
+    进度会随执行而变（(0/2) → (1/2)），把它留在键里就意味着同一个任务每推进
+    一次就换一个身份：「试了两次没进展就放弃」的计数被重置，任务永远放弃不了；
+    反过来一旦改成粘性放弃，又会在有进展时把人误伤。去掉进度才能一处记账。
+    """
+    return _PROGRESS_RE.sub("", task_key(text)).strip()
+
+
 # 任务名下方那行灰色说明文字。真机（一加 Ace 3）实测每行任务的结构是：
 #     任务名      「搜一搜你心仪的宝贝(0/3)」
 #     说明文字    「浏览15秒」
@@ -496,7 +506,7 @@ def pick_task(
         # 不排除就会被当成任务挑走，点它只是点在纯文本上。
         if is_subtitle(item.text):
             continue
-        text = task_key(item.text)
+        text = dedupe_key(item.text)
         if text in exclude:
             skipped.append(f"{item.text}(已放弃)")
             continue
@@ -575,8 +585,52 @@ def search_keyword(config: dict[str, Any], attempt: int = 0) -> str:
     return str(keywords[attempt % len(keywords)])
 
 
-def action_duration(kind: str, config: dict[str, Any]) -> float:
-    """不同任务类型在目标页面的停留秒数。"""
+# 任务要求的浏览秒数：写在任务名里（「逛清单，每15秒30金币」）
+# 或名字下方那行说明文字里（「浏览15秒」「浏览5秒」）。
+_REQUIRED_SECONDS_RE = re.compile(r"(?:浏览|每)\s*(\d+)\s*秒")
+
+
+def required_seconds(items: Sequence[OcrItem], target: OcrItem) -> float:
+    """这个任务在目标页面要求的浏览秒数。
+
+    淘宝按「页面有没有在动」累计浏览时长，停着不动不计时，所以这个秒数就是
+    下限：没滑够就去下一个任务，进度不会增加，等于白做一次。秒数写在任务名
+    或它下方那行说明文字里，只认任务名自己与紧挨着它下方的那条说明 —— 整屏
+    每行都有一条说明文字，取错行会让停留时间凭空翻几倍。
+    """
+    own = _REQUIRED_SECONDS_RE.search(normalize_text(target.text))
+    if own:
+        return float(own.group(1))
+
+    best = 0.0
+    best_dy: int | None = None
+    for item in items:
+        if not is_subtitle(item.text):
+            continue
+        dy = item.y - target.y
+        if dy <= 0 or dy > ACTION_BUTTON_DY * 2:
+            continue
+        match = _REQUIRED_SECONDS_RE.search(normalize_text(item.text))
+        if not match:
+            continue
+        if best_dy is None or dy < best_dy:
+            best_dy = dy
+            best = float(match.group(1))
+    return best
+
+
+# 满足停留要求后多留的秒数：淘宝计时是整秒粒度，卡在边界结束容易被判成没满。
+DWELL_MARGIN = 4.0
+
+
+def dwell_seconds(kind: str, config: dict[str, Any], required: float = 0.0) -> float:
+    """这个任务该停留多久。
+
+    required 是任务自己写明的秒数（「浏览15秒」「每15秒30金币」），可能为 0。
+    淘宝的浏览任务按「页面在动」累计时长，所以这个秒数就是真正的下限：
+    停不够就去下一个任务，进度不会增加，等于白做一次。
+    配置里的时长只是没识别到要求时的兵底值。
+    """
     timing = config.get("timing", {})
     key = {
         "browse": "browse_duration_seconds",
@@ -584,4 +638,7 @@ def action_duration(kind: str, config: dict[str, Any]) -> float:
     }.get(kind)
     if not key:
         return 0.0
-    return float(timing.get(key, 3))
+    total = float(timing.get(key, 3))
+    if required > 0:
+        return max(total, required + DWELL_MARGIN)
+    return total

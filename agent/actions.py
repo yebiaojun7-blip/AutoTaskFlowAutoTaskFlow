@@ -39,11 +39,20 @@ def _sleep(seconds: float) -> None:
         time.sleep(seconds)
 
 
+# 当前这轮截图的真实尺寸（宽, 高）。点击和滑动都必须用这个坐标系。
+_FRAME_SIZE: tuple[int, int] | None = None
+
+
 def _screencap(context: Any) -> Any:
     """截一张图。缩放到 display_short_side 后，坐标与 OCR box 同一坐标系。"""
+    global _FRAME_SIZE
     job = _controller(context).post_screencap()
     job.wait()
-    return job.get()
+    image = job.get()
+    shape = getattr(image, "shape", None)
+    if shape is not None and len(shape) >= 2:
+        _FRAME_SIZE = (int(shape[1]), int(shape[0]))
+    return image
 
 
 def _ocr_items(context: Any, image: Any, node: str) -> list[panel.OcrItem]:
@@ -73,11 +82,21 @@ def _back(context: Any, *, delay: float = 1.2) -> None:
     _sleep(delay)
 
 
+# 滑动手势必须落在这个纵向区间里。
+# 下边留到 0.85：再往下是系统手势导航条和淘宝底部标签栏，手指按在那里会被
+# 当成返回/切页手势，整次滑动直接被吞掉（实测 0.92 以下 diff 从 72 跌到 0.13）。
+# 上边留到 0.18：再往上会盖到状态栏或页面顶部横幅。
+_SCROLL_SAFE_TOP = 0.18
+_SCROLL_SAFE_BOTTOM = 0.85
+
+
 def _swipe_up(context: Any, *, delay: float = 1.0) -> None:
     """从下方往上滑，用于把任务面板滚回顶部。"""
     width, height = _screen_size(context)
     x = width // 2
-    _controller(context).post_swipe(x, int(height * 0.75), x, int(height * 0.25), 400).wait()
+    start = int(height * _SCROLL_SAFE_BOTTOM)
+    end = int(height * _SCROLL_SAFE_TOP)
+    _controller(context).post_swipe(x, start, x, end, 400).wait()
     _sleep(delay)
 
 
@@ -90,34 +109,41 @@ _SCROLL_BOTTOM = 0.68
 
 
 def _scroll_once(context: Any, *, upward: bool = True) -> None:
-    """在页面内容区滑一小段；上下来回滑，位置不会越滑越远。"""
+    """在页面内容区滑一小段。
+
+    只往上滑，不来回滑：往上滑永远是「看后面的内容」，页面始终在推进；
+    往下滑到顶之后就没有内容可露，白白浪费时间还可能触发下拉刷新。
+    """
     width, height = _screen_size(context)
     x = width // 2
-    top = int(height * _SCROLL_TOP)
-    bottom = int(height * _SCROLL_BOTTOM)
     if upward:
-        _controller(context).post_swipe(x, bottom, x, top, 500).wait()
+        start, end = _SCROLL_BOTTOM, _SCROLL_TOP
     else:
-        _controller(context).post_swipe(x, top, x, bottom, 500).wait()
+        start, end = _SCROLL_TOP, _SCROLL_BOTTOM
+    _controller(context).post_swipe(
+        x, int(height * start), x, int(height * end), 500
+    ).wait()
     _sleep(0.5)
 
 
 def _dwell(context: Any, seconds: float, *, scroll: bool) -> None:
-    """在目标页停留指定秒数；需要滑动的页面边滑边等。"""
+    """在目标页停留指定秒数；需要滑动的页面边滑边等。
+
+    滑动不是「顺便做的」而是计时本身：淘宝的浏览任务按页面有没有在动累计时长，
+    界面完全静止时不计时。所以停留期间必须持续滑动，而且不能只滑一次就停。
+    """
     if seconds <= 0:
         return
     if not scroll:
         _sleep(seconds)
         return
     remaining = seconds
-    upward = True
     while remaining > 0:
         chunk = min(_SCROLL_INTERVAL, remaining)
         _sleep(chunk)
         remaining -= chunk
         if remaining > 0:
-            _scroll_once(context, upward=upward)
-            upward = not upward
+            _scroll_once(context)
 
 
 def _job_succeeded(job: Any) -> bool:
@@ -163,15 +189,25 @@ def _shell(context: Any, command: str) -> str | None:
         return None
 
 
+# 拿不到截图尺寸时的兜底值，与 interface.json 的 display_short_side 不冲突。
+_FALLBACK_FRAME = (1280, 720)
+
+
 def _screen_size(context: Any) -> tuple[int, int]:
-    """取控制器分辨率；取不到时退回 1280x720 基准。"""
-    try:
-        resolution = _controller(context).resolution
-        if isinstance(resolution, (list, tuple)) and len(resolution) == 2:
-            return int(resolution[0]), int(resolution[1])
-    except Exception:  # noqa: BLE001 - 取不到就用基准值，不应因此中断任务
-        pass
-    return 1280, 720
+    """手势坐标系：必须是截图尺寸，不能用设备原始分辨率。
+
+    post_click / post_swipe 收的是截图坐标系里的点（截图按 display_short_side
+    缩放过）。设备分辨率是另一套数字：手机 1080x2376 上截图只有 720x1584。
+    按设备分辨率算滑动起点会落到截图范围外，手势被当成从屏幕顶部按下，
+    于是「往上滑」变成点顶部、页面纹丝不动；往下滑因为终点被截断到边界，
+    碰巧还是一次合法拖动，所以只有往上滑出问题。
+    """
+    if _FRAME_SIZE is not None:
+        return _FRAME_SIZE
+    # 正常路径上每次循环都先截图再动手，不会走到这里；真走到了宁可用兜底值，
+    # 也不能回头去读设备分辨率——那正是这个 bug 的来源。
+    LOGGER.warning("尚未截到图，滑动手势暂用 %dx%d 兜底坐标", *_FALLBACK_FRAME)
+    return _FALLBACK_FRAME
 
 
 def _run_search(context: Any, keyword: str, config: dict[str, Any], image: Any) -> None:
@@ -194,13 +230,25 @@ def _run_search(context: Any, keyword: str, config: dict[str, Any], image: Any) 
     else:
         LOGGER.info("未定位到搜索框，仅停留后返回")
 
-    # 搜索结果页同样要滑动才算浏览，静止停留不计时长。
-    _dwell(context, panel.action_duration("jump", config), scroll=True)
+    # 搜索结果页同样要滑着才算浏览，界面静止不计时长。
+    total = panel.dwell_seconds("jump", config)
+    LOGGER.info("搜索结果页停留 %.1f 秒", total)
+    _dwell(context, total, scroll=True)
     _back(context)
 
 
-def _run_task(context: Any, pick: panel.PanelPick, config: dict[str, Any], button: panel.OcrItem) -> None:
-    """点击任务按钮并按任务类型等待，然后返回任务面板。"""
+def _run_task(
+    context: Any,
+    pick: panel.PanelPick,
+    config: dict[str, Any],
+    button: panel.OcrItem,
+    items: list[panel.OcrItem],
+) -> None:
+    """点击任务按钮并按任务类型等待，然后返回任务面板。
+
+    items 是面板上已识别出来的内容，用来读任务自己写明的停留要求，
+    避免为了这个再截一次图。
+    """
     kind = pick.decision.kind
     _click_item(context, button, delay=1.5)
 
@@ -213,14 +261,20 @@ def _run_task(context: Any, pick: panel.PanelPick, config: dict[str, Any], butto
     # 要真的点确认进去做，不能取消：取消就是放弃任务。
     # 这个框盖在面板上方且面板文字仍能被识别，不处理就会永远卡在这里。
     if kind == "jump":
-        items = _scan(context)
-        if panel.open_app_dialog_visible(items) and _open_app_dialog_action(context, items):
+        popped = _scan(context)
+        if panel.open_app_dialog_visible(popped) and _open_app_dialog_action(context, popped):
             LOGGER.info("已确认打开外部小程序，进去做任务「%s」", pick.item.text)
 
-    duration = panel.action_duration(kind, config)
-    LOGGER.info("任务类型 %s，停留 %.1f 秒", kind, duration)
-    # 浏览类和跳转到的会场页都是靠滑动才继续累计，静止等待等于白等。
-    _dwell(context, duration, scroll=kind in ("browse", "jump"))
+    required = panel.required_seconds(items, pick.item)
+    total = panel.dwell_seconds(kind, config, required)
+    LOGGER.info(
+        "任务类型 %s，任务要求停留 %.0f 秒，实际停留 %.1f 秒",
+        kind,
+        required,
+        total,
+    )
+    # 浏览类和跳转到的会场页都是靠页面在动才累计，停留期间必须持续滑动。
+    _dwell(context, total, scroll=kind in ("browse", "jump"))
     _back(context)
 
 
@@ -519,7 +573,7 @@ def run_daily_loop(context: Any, config: dict[str, Any], *, max_rounds: int = DE
                     return True
                 continue
 
-        name = panel.task_key(pick.item.text)
+        name = panel.dedupe_key(pick.item.text)
         button = panel.find_action_button(items, pick.item) or pick.item
         LOGGER.info(
             "第 %d 轮：执行「%s」（%s），按钮「%s」",
@@ -528,7 +582,7 @@ def run_daily_loop(context: Any, config: dict[str, Any], *, max_rounds: int = DE
             pick.decision.kind,
             button.text,
         )
-        _run_task(context, pick, config, button)
+        _run_task(context, pick, config, button, items)
         completed += 1
         empty_rounds = 0
 
@@ -571,10 +625,14 @@ def _progress_stuck(
 
 
 def _find_progress(context: Any, name: str) -> tuple[int, int] | None:
-    """在任务面板上找到同名任务，读它的进度。"""
+    """在任务面板上找到同名任务，读它的进度。
+
+    name 是去掉进度后缀的去重键，这里按前缀匹配：面板上那一条的进度后缀
+    会随执行变化，拿完整文字去对是找不到的。
+    """
     key = name[:6]
     for item in _scan(context):
-        if panel.task_key(item.text).startswith(key):
+        if panel.dedupe_key(item.text).startswith(key):
             progress = panel.task_progress(item.text)
             if progress is not None:
                 return progress
