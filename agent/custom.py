@@ -85,7 +85,7 @@ def _contains_any(text: str, candidates: Iterable[str]) -> str:
 
 
 def classify_task(text: str, config: dict[str, Any] | None = None) -> TaskDecision:
-    """按黑名单、已完成、搜索、跳转、普通浏览的优先级分类任务。"""
+    """按黑名单、已完成、搜索、跳转、答题、普通浏览的优先级分类任务。"""
     config = config or load_config()
     normalized_text = "".join(text.split())
 
@@ -110,6 +110,12 @@ def classify_task(text: str, config: dict[str, Any] | None = None) -> TaskDecisi
     jump_hit = _contains_any(normalized_text, config.get("jump_tasks", []))
     if jump_hit:
         return TaskDecision("jump", jump_hit, "跨应用或会场任务")
+
+    # 答题类必须排在浏览之前：这类任务点进去是一道二选一的单选题，
+    # 当浏览任务处理只会停留一会儿再返回，进度永远不涨。
+    quiz_hit = _contains_any(normalized_text, config.get("quiz_tasks", []))
+    if quiz_hit:
+        return TaskDecision("quiz", quiz_hit, "答题任务")
 
     browse_hit = _contains_any(normalized_text, config.get("browse_tasks", []))
     if browse_hit:

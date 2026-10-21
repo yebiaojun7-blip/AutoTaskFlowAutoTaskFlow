@@ -123,8 +123,8 @@ _SCROLL_BOTTOM = 0.68
 def _scroll_once(context: Any, *, upward: bool = True) -> None:
     """在页面内容区滑一小段。
 
-    只往上滑，不来回滑：往上滑永远是「看后面的内容」，页面始终在推进；
-    往下滑到顶之后就没有内容可露，白白浪费时间还可能触发下拉刷新。
+    upward=True 是「看后面的内容」，停留浏览时用；upward=False 是手指往下拖，
+    把页面拉回顶部，用来找被滚出屏幕的入口图标。
     """
     width, height = _screen_size(context)
     x = width // 2
@@ -296,6 +296,44 @@ def _run_search(
     return True
 
 
+def _run_quiz(context: Any, *, tries: int = 5) -> bool:
+    """答题任务：选一个选项 → 提交 → 等结果页，然后返回任务面板。
+
+    「淘金币趣味课堂」点进去是一道二选一的单选题，不是浏览页。当成浏览任务
+    停留再久也不会推进：奖励挂在「提交答案」这一步上，页面上的选项不点、
+    「我选好了」不按，任务永远停在原处，主循环就会一直重跑它。
+
+    答案猜不出来也不需要猜 —— 任务文案是「参与答题」，不是「答对」。
+    返回是否真的答完（看到结果页）。没答完时调用方必须把这次算作失败。
+    """
+    items = _wait_for(lambda current: panel.quiz_option(current) is not None, context, tries=tries, delay=1.5)
+    option = panel.quiz_option(items)
+    if option is None:
+        LOGGER.warning("答题页上没找到选项，退出这次答题")
+        return False
+
+    LOGGER.info("选择答案「%s」", option.text)
+    _click_item(context, option, delay=1.5)
+
+    # 「我选好了」在选中之前是灰的，点不动，所以必须选完再找它。
+    submit = panel.quiz_submit(_scan(context))
+    if submit is None:
+        LOGGER.warning("没找到「我选好了」按钮，答案没有提交")
+        return False
+
+    LOGGER.info("点击「%s」提交答案", submit.text)
+    _click_item(context, submit, delay=2.0)
+
+    result = _wait_for(panel.quiz_answered, context, tries=tries, delay=1.5)
+    if not panel.quiz_answered(result):
+        LOGGER.warning("提交后没看到答题结果页，这次答题不算完成")
+        return False
+    LOGGER.info("答题完成")
+    # 结果页底部是「已成功领取奖励 回到主页」，按返回直接退回任务面板。
+    _back(context)
+    return True
+
+
 def _run_task(
     context: Any,
     pick: panel.PanelPick,
@@ -318,6 +356,11 @@ def _run_task(
         keyword = pick.decision.search_keyword or panel.search_keyword(config)
         required = panel.required_seconds(items, pick.item)
         return _run_search(context, keyword, config, required=required)
+
+    # 答题任务点进去是单选题，必须选答案、点提交才有奖励；
+    # 当成浏览任务停留只会空等，进度一动不动。
+    if kind == "quiz":
+        return _run_quiz(context)
 
     # 跳转类任务（蚂蚁庄园 / 蚂蚁森林 / 跳闲鱼 / 站外页）点下去会弹确认框，
     # 要真的点确认进去做，不能取消：取消就是放弃任务。
@@ -487,10 +530,15 @@ def _recover_to_panel(context: Any, config: dict[str, Any], *, tries: int = 6) -
       5. 停在促销浮层（如「双11提前领好券」）—— 封面挡住了入口，按返回关掉；
       6. 挡住「想要打开其他应用」确认框 —— 直接点「打开」继续这次跳转；
       7. 已经跳到别的应用 —— 重新打开淘宝。
+
+    首页单独处理：那排图标（「领淘金币」）会随信息流一起滚出屏幕，启动动画期间
+    也可能还没渲染出来。这两种情况下按返回都会直接退出淘宝，于是越退越找不到入口，
+    所以只能往下滑找入口，实在不行重启淘宝，唯独不能按返回。
     """
     if _ensure_taobao_foreground(context, config):
         LOGGER.info("已重新打开淘宝，继续找任务面板")
 
+    home_tries = 0
     for _ in range(tries):
         items = _scan(context)
 
@@ -517,6 +565,12 @@ def _recover_to_panel(context: Any, config: dict[str, Any], *, tries: int = 6) -
             _back(context)
             continue
 
+        if panel.quiz_page_visible(items):
+            # 答题页没有任务入口，按返回能直接退出（不能点标题里的「淘金币」）。
+            LOGGER.info("误入淘金币答题页，返回退出")
+            _back(context)
+            continue
+
         if panel.coin_home_visible(items):
             entry = panel.find_text_by_keywords(items, panel.COIN_HOME_ENTRY)
             if entry is not None:
@@ -539,6 +593,22 @@ def _recover_to_panel(context: Any, config: dict[str, Any], *, tries: int = 6) -
                     break
             if clicked:
                 continue
+
+        if panel.home_tab_bar_visible(items):
+            # 首页上按返回等于退出淘宝，越退越回不到入口。先把信息流滚回顶部
+            # 找那排图标；滚两趟还找不到就重开淘宝，让首页回到初始状态。
+            home_tries += 1
+            if home_tries <= 2:
+                LOGGER.info("停在淘宝首页但没看到淘金币入口，向上滑动找图标行")
+                _scroll_once(context, upward=False)
+            elif home_tries == 3:
+                LOGGER.info("淘宝首页找不到淘金币入口，重新启动淘宝")
+                start_app(context, config)
+                _sleep(2.0)
+            else:
+                # 刚重启的淘宝要几秒才渲染出图标行，等着别按键，也不能反复重启。
+                _sleep(2.0)
+            continue
 
         _back(context)
 

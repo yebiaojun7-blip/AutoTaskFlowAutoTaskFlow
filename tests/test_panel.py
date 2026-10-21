@@ -716,6 +716,22 @@ DEVICE_HOME = [
 ]
 
 
+# 真机失败帧（2026-10-21 15:19:55，淘宝刚被拉起、首页还在渲染）：同一屏被 OCR
+# 读了两遍，顶部那排图标（「领淘金币」）当时还没渲染出来，但底部标签栏已经在。
+# 旧逻辑在这里落到兜底分支按返回，而首页按返回是退出淘宝，于是连续退出六次。
+DEVICE_HOME_RENDERING = [
+    text_item("关注", 25, 89, 74, 46),
+    text_item("推荐", 115, 87, 84, 49),
+    text_item("搜索", 593, 168, 73, 43),
+    text_item("双11开门红券后低至7.2折", 24, 405, 453, 45),
+    text_item("立即抢>", 491, 683, 105, 36),
+    text_item("双11官方立减15%", 250, 900, 300, 40),
+    text_item("再按一次返回键退出手机淘宝", 300, 1100, 400, 40),
+    text_item("购物车", 467, 1516, 73, 31),
+    text_item("我的淘宝", 596, 1518, 95, 29),
+]
+
+
 class PageKindTest(unittest.TestCase):
     def test_page_kinds_are_distinguished(self) -> None:
         team = panel.parse_ocr_items(TEAM_PAGE)
@@ -782,6 +798,27 @@ class RecoverTest(unittest.TestCase):
         self.assertTrue(actions._recover_to_panel(context, fast_config()))
         self.assertFalse(any("am start" in shell for shell in context.controller.shells))
         self.assertEqual(context.controller.keys, [])
+
+    def test_home_without_coin_entry_never_presses_back(self) -> None:
+        """首页那排图标还没渲染出来时，返回键会直接退出淘宝，只能滑动或重启。"""
+        context = FakeContext(
+            [DEVICE_HOME_RENDERING, DEVICE_HOME_RENDERING, DEVICE_HOME, PANEL_ROW]
+        )
+        result = actions.open_coin_page(context, fast_config())
+
+        self.assertTrue(result)
+        self.assertNotIn(4, context.controller.keys)
+        # 找不到入口时先把信息流拉回顶部，图标行滚回来后再点「淘金币」。
+        self.assertTrue(context.controller.swipes)
+        self.assertTrue(context.controller.clicks)
+
+    def test_home_without_coin_entry_restarts_taobao_instead_of_backing_out(self) -> None:
+        """滑动也找不到入口时，重启淘宝而不是一路按返回把自己退出应用。"""
+        context = FakeContext([DEVICE_HOME_RENDERING] * 6 + [PANEL_ROW])
+        actions._recover_to_panel(context, fast_config(), tries=4)
+
+        self.assertNotIn(4, context.controller.keys)
+        self.assertTrue(any("taobao" in shell for shell in context.controller.shells))
 
 
 # 真机截图（应用分身 → 支付宝小程序）：横向排版，带「打开」按钮
@@ -1019,6 +1056,17 @@ class CoinEntryTest(unittest.TestCase):
         text_item("双11提前领好券", 85, 100, 225, 40),
         text_item("苹果惊喜券至高领450元", 33, 259, 317, 39),
     ]
+    # 真机 2026-10-21 15:38 的答题页：标题块含「淘金币」，被当成首页入口反复点击。
+    QUIZ = [
+        text_item("1. 猜一猜：曲艺表演“双簧”最早得名于单选题", 24, 60, 600, 50),
+        text_item("←淘金币答题57464", 19, 97, 387, 41),
+        text_item("A表演者姓黄", 30, 300, 200, 40),
+        text_item("B两种乐器的名字", 260, 300, 260, 40),
+        text_item("每日答题", 30, 400, 150, 40),
+        text_item("赢金币", 500, 500, 120, 40),
+        text_item("题目来源：支付宝·答答星球", 100, 700, 400, 40),
+        text_item("我选好了", 400, 1300, 200, 60),
+    ]
 
     def test_keyword_center_lands_on_the_keyword_not_the_block_center(self) -> None:
         item = panel.parse_ocr_items(self.MERGED)[0]
@@ -1081,10 +1129,21 @@ class CoinEntryTest(unittest.TestCase):
 
         self.assertTrue(result)
         self.assertNotIn(4, context.controller.keys)
-        # 「领淘金币」在首排左起第一个，中心 x 应远小于整块中心。
-        self.assertTrue(context.controller.clicks)
-        x, y = context.controller.clicks[0]
-        self.assertLess(x, 200)
+
+    def test_quiz_page_title_is_not_taken_as_home_entry(self) -> None:
+        """答题页标题「←淘金币答题57464」含关键词，但不是首页入口。"""
+        self.assertIsNone(panel.coin_entry_point(panel.parse_ocr_items(self.QUIZ)))
+        self.assertTrue(panel.quiz_page_visible(panel.parse_ocr_items(self.QUIZ)))
+
+    def test_recover_leaves_quiz_page_by_back(self) -> None:
+        """误入答题页时按返回退出，不能一直点标题原地打转。"""
+        context = FakeContext([self.QUIZ, self.QUIZ, PANEL_ROW, DONE_ONLY])
+        result = actions.open_coin_page(context, fast_config())
+
+        self.assertTrue(result)
+        self.assertIn(4, context.controller.keys)
+        for x, y in context.controller.clicks:
+            self.assertFalse(x < 400 and y < 150, f"点了答题页标题 {(x, y)}")
 
 
 class AppUserTest(unittest.TestCase):
@@ -1465,6 +1524,126 @@ class CompletionTest(unittest.TestCase):
         )
         self.assertIsNone(panel.overall_progress(items))
         self.assertFalse(panel.overall_done(items))
+
+
+class QuizTaskTest(unittest.TestCase):
+    """「淘金币趣味课堂」点进去是二选一的单选题，不是浏览页。
+
+    真机实测：面板上这一行的说明文字是「参与答题」，点进去是一道题 + A/B 两个
+    选项 + 底部「我选好了」。按浏览停留 22 秒再返回，进度一动不动，任务永远
+    停在面板上；必须选一个选项、点提交，金币才会加。
+    """
+
+    # 真机（一加 Ace 3 / 淘宝 2026-10-21）答题页整屏 OCR，坐标原样抄自日志。
+    QUIZ_PAGE = [
+        text_item("←淘金币答题57494", 22, 179, 383, 33),
+        text_item("每日答题", 27, 252, 183, 86),
+        text_item("赢金币", 234, 260, 241, 71),
+        text_item("1.猜一猜：曲艺表演“双簧”最早得名于单选题", 17, 483, 595, 35),
+        text_item("A表演者姓黄", 45, 594, 184, 33),
+        text_item("B两种乐器的名字", 48, 721, 233, 28),
+        text_item("题目来源：支付宝·答答星球", 239, 1181, 241, 23),
+        text_item("我选好了", 168, 1465, 384, 34),
+    ]
+
+    # 提交后的结果页：真机实测多了「正确答案：A」「你的答案：A」和底部
+    # 「已成功领取奖励 回到主页」，金币 57494 → 57524。
+    QUIZ_RESULT = QUIZ_PAGE + [
+        text_item("正确答案：A", 38, 853, 180, 33),
+        text_item("你的答案：A", 38, 899, 146, 29),
+        text_item("已成功领取奖励回到主页", 168, 1465, 384, 34),
+    ]
+
+    # 任务面板上这一行：名字「淘金币趣味课堂」+ 说明「参与答题」+ 右侧 +30。
+    PANEL_WITH_QUIZ = [
+        text_item("完成下方任务得额外金币", 45, 313, 252, 23),
+        text_item("淘金币趣味课堂", 130, 587, 204, 33),
+        text_item("参与答题", 128, 625, 100, 35),
+        text_item("+30", 604, 610, 51, 33),
+        text_item("去蚂蚁庄园逛逛哟", 130, 727, 233, 33),
+        text_item("点击去逛", 126, 768, 100, 30),
+        text_item("+50", 602, 750, 52, 33),
+    ]
+
+    def setUp(self) -> None:
+        self._original_sleep = actions._sleep
+        actions._sleep = lambda seconds: None
+
+    def tearDown(self) -> None:
+        actions._sleep = self._original_sleep
+
+    def test_quiz_task_is_not_classified_as_browse(self) -> None:
+        """按浏览处理是这个 bug 的根源：停留再久进度也不涨。"""
+        decision = panel.classify_task("淘金币趣味课堂", load_config())
+        self.assertEqual(decision.kind, "quiz")
+
+    def test_quiz_task_is_picked_by_the_panel(self) -> None:
+        items = panel.parse_ocr_items(self.PANEL_WITH_QUIZ)
+        pick = panel.pick_task(items, load_config())
+        self.assertIsNotNone(pick.item)
+        assert pick.item is not None
+        self.assertEqual(pick.item.text, "淘金币趣味课堂")
+        self.assertEqual(pick.decision.kind, "quiz")
+
+    def test_option_and_submit_are_found_on_the_quiz_page(self) -> None:
+        items = panel.parse_ocr_items(self.QUIZ_PAGE)
+        option = panel.quiz_option(items)
+        self.assertIsNotNone(option)
+        assert option is not None
+        # 题面（以数字开头）不能被当成选项。
+        self.assertEqual(option.text, "A表演者姓黄")
+        self.assertIsNotNone(panel.quiz_submit(items))
+
+    def test_result_page_is_recognised_as_answered(self) -> None:
+        self.assertFalse(panel.quiz_answered(panel.parse_ocr_items(self.QUIZ_PAGE)))
+        self.assertTrue(panel.quiz_answered(panel.parse_ocr_items(self.QUIZ_RESULT)))
+
+    def test_quiz_task_picks_an_option_and_submits(self) -> None:
+        screens = [
+            self.PANEL_WITH_QUIZ,
+            self.QUIZ_PAGE,
+            self.QUIZ_PAGE,
+            self.QUIZ_RESULT,
+            DONE_ONLY,
+        ]
+        context = FakeContext(screens)
+
+        actions.run_daily_loop(context, fast_config(), max_rounds=1)
+
+        # 选项块中心 (137,610)、提交按钮中心 (360,1482)。
+        self.assertIn((137, 610), context.controller.clicks)
+        self.assertIn((360, 1482), context.controller.clicks)
+
+    def test_quiz_task_does_not_just_dwell_and_go_back(self) -> None:
+        """按浏览处理时只会滑动 + 返回；答题必须有选选项这一步。"""
+        screens = [
+            self.PANEL_WITH_QUIZ,
+            self.QUIZ_PAGE,
+            self.QUIZ_PAGE,
+            self.QUIZ_RESULT,
+            DONE_ONLY,
+        ]
+        context = FakeContext(screens)
+
+        actions.run_daily_loop(context, fast_config(), max_rounds=1)
+
+        option = panel.quiz_option(panel.parse_ocr_items(self.QUIZ_PAGE))
+        assert option is not None
+        self.assertIn(option.center, context.controller.clicks)
+
+    def test_quiz_without_options_is_not_counted_as_done(self) -> None:
+        """答题页没渲染出选项时不能算完成，否则会一直空跑同一个任务。"""
+        blank = [text_item("加载中", 300, 600, 120, 30)]
+        screens = [self.PANEL_WITH_QUIZ] + [blank] * 12 + [DONE_ONLY]
+        context = FakeContext(screens)
+
+        with self.assertLogs("autotaskflow", level="WARNING") as logs:
+            actions.run_daily_loop(context, fast_config(), max_rounds=1)
+
+        self.assertTrue(any("没找到选项" in line for line in logs.output))
+        self.assertTrue(any("未能真正执行" in line for line in logs.output))
+        # 没找到选项就不能瞎点：提交按钮一次都不该被按。
+        self.assertNotIn((360, 1482), context.controller.clicks)
 
 
 if __name__ == "__main__":

@@ -83,6 +83,7 @@ TASK_CONFIG_LISTS = (
     "blacklist",
     "jump_tasks",
     "search_tasks",
+    "quiz_tasks",
     "browse_tasks",
     "safety_keywords",
     "search_keywords",

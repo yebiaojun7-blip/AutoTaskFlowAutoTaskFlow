@@ -13,7 +13,8 @@ from agent.custom import TaskDecision, classify_task, load_config
 
 
 # 可执行任务的分类结果，用于判断一次挑选是否命中。
-EXECUTABLE_KINDS = ("search", "jump", "browse")
+# quiz 单列一类：答题任务点进去是一道二选一的单选题，按浏览停留再久也不推进。
+EXECUTABLE_KINDS = ("search", "jump", "browse", "quiz")
 
 # 任务面板的特征词，用于判断"当前是否还停留在淘金币任务面板"。
 #
@@ -218,10 +219,21 @@ def find_safety(items: Iterable[OcrItem], keywords: Iterable[str]) -> OcrItem | 
     return None
 
 
-def find_text_by_keywords(items: Iterable[OcrItem], keywords: Iterable[str]) -> OcrItem | None:
-    """按给定文案顺序找第一个命中的文字块，未命中返回 None。"""
+def find_text_by_keywords(
+    items: Iterable[OcrItem],
+    keywords: Iterable[str],
+    *,
+    skip_nav_titles: bool = False,
+) -> OcrItem | None:
+    """按给定文案顺序找第一个命中的文字块，未命中返回 None。
+
+    skip_nav_titles 用来跳过带返回箭头的页面标题：「←淘金币答题57464」含
+    「淘金币」，但它是内层页面的标题，点它只会原地不动。
+    """
     wanted = [normalize_text(word) for word in keywords]
     for item in items:
+        if skip_nav_titles and any(glyph in item.text for glyph in NAV_GLYPHS):
+            continue
         for word in wanted:
             if word and word in item.text:
                 return item
@@ -407,9 +419,37 @@ COIN_HOME_ENTRY = ("赚金币",)
 # 例如「领淘金币充值中心试用领取常买超市」，所以只能按字符占比推算点击位置。
 COIN_ENTRY_KEYWORDS = ("淘金币", "领金币", "我的淘金币")
 
+# 内层页面的标题前会带返回箭头，例如「←淘金币答题57464」。首页那一排图标
+# 即使被 OCR 合并成一整块（「领淘金币充值中心试用领取常买超市」）也不含这些符号，
+# 所以按导航符号排除比按长度排除可靠 —— 合并块比标题还长。
+NAV_GLYPHS = ("←", "→")
+
+# 淘金币答题页（每日答题活动，会从首页「去赚金币」附近被误点进来）。
+# 这一层按返回能直接退出，但页面上没有任务入口，必须识别出来主动退出，
+# 否则会一直点标题里的「淘金币」，页面纹丝不动。
+QUIZ_PAGE_MARKERS = ("答答星球", "我选好了", "答题")
+
+# 答题页上的选项块。真机实测 OCR 把字母和选项内容合成一块：
+#     A表演者姓黄 / B两种乐器的名字
+# 字母后面必须紧跟中文，这样面板上的拉丁字母串（「TAO」「OA」）和结果页的
+# 「正确答案：A」都不会被误认成选项；题面「1.猜一猜：…单选题」以数字开头，
+# 也进不来。
+QUIZ_OPTION_RE = re.compile(r"^[A-D][^\x00-\x7f]{2,}$")
+
+# 答题页底部的提交按钮。它是**灰的**，选完选项才变黄，所以点击顺序不能反。
+QUIZ_SUBMIT_WORDS = ("我选好了",)
+
+# 答完后的结果页特征：真机实测会出现「正确答案：A」「你的答案：A」，
+# 页面底部变成「已成功领取奖励 回到主页」。看到它才算这次答题真的完成了。
+QUIZ_DONE_MARKERS = ("正确答案", "你的答案", "已成功领取奖励")
+
 # 淘宝首页的特征词，用于区分"首页"和"启动后的促销浮层"。
 # 首页按返回键会直接退出淘宝，促销浮层则必须按返回才能关掉，两者处理相反。
 TB_HOME_MARKERS = ("搜索", "推荐", "关注", "购物车")
+
+# 首页底部标签栏的文字。商品详情页也有「搜索」「购物车」，只能靠这一栏区分：
+# 有标签栏说明还在首页（按返回会退出淘宝），没有就说明已经进到内层页面（该按返回）。
+HOME_TAB_MARKERS = ("我的淘宝",)
 
 # 淘宝首页上的促销弹层会把首页入口盖住，但 OCR 仍可能识别到弹层后面的
 # 「搜索」「推荐」和「淘金币」。命中这些弹层文案时必须先关掉当前层，再重扫首页。
@@ -465,9 +505,45 @@ def coin_home_visible(items: Iterable[OcrItem]) -> bool:
     return panel_visible(items, COIN_HOME_MARKERS)
 
 
+def quiz_page_visible(items: Iterable[OcrItem]) -> bool:
+    """当前屏是否是淘金币答题页（没有任务入口，按返回退出）。"""
+    return panel_visible(items, QUIZ_PAGE_MARKERS, min_hits=2)
+
+
+def quiz_answered(items: Iterable[OcrItem]) -> bool:
+    """答题页是否已经答完、正显示结果（正确答案 / 已领取奖励）。"""
+    return panel_visible(items, QUIZ_DONE_MARKERS)
+
+
+def quiz_option(items: Iterable[OcrItem]) -> OcrItem | None:
+    """答题页上的一个选项，取最上面那个，没有则返回 None。
+
+    单选题的正确答案猜不出来，也不需要猜：任务文案写的是「参与答题」，
+    奖励挂在参不参与上而不是答对与否，随便选一个再提交即可。
+    """
+    options = [item for item in items if QUIZ_OPTION_RE.match(item.text)]
+    if not options:
+        return None
+    return min(options, key=lambda item: (item.y, item.x))
+
+
+def quiz_submit(items: Iterable[OcrItem]) -> OcrItem | None:
+    """答题页底部的提交按钮，未渲染出来时返回 None。"""
+    return find_text_by_keywords(items, QUIZ_SUBMIT_WORDS)
+
+
 def taobao_home_visible(items: Iterable[OcrItem]) -> bool:
     """当前屏是否是淘宝 App 首页（不是促销浮层，也不是淘金币页面）。"""
     return panel_visible(items, TB_HOME_MARKERS)
+
+
+def home_tab_bar_visible(items: Iterable[OcrItem]) -> bool:
+    """当前屏是否显示首页底部标签栏。
+
+    商品详情页、搜索结果页同样有「搜索」「购物车」，只有标签栏里的「我的淘宝」
+    是首页独有的。区分这两类很重要：首页按返回会退出淘宝，详情页必须按返回。
+    """
+    return panel_visible(items, HOME_TAB_MARKERS)
 
 
 def promo_layer_visible(items: Iterable[OcrItem]) -> bool:
@@ -533,8 +609,13 @@ def open_app_dialog_button(items: Iterable[OcrItem], words: Sequence[str]) -> Oc
 
 
 def coin_entry_point(items: Sequence[OcrItem]) -> OcrItem | None:
-    """在淘宝首页上定位「淘金币」入口文字块。"""
-    return find_text_by_keywords(items, COIN_ENTRY_KEYWORDS)
+    """在淘宝首页上定位「淘金币」入口文字块。
+
+    只认首页那一排图标的短标签。内层页面的标题里也有「淘金币」，例如答题页顶部
+    的「←淘金币答题57464」、结果页的「淘金币抵扣」说明，直接按包含匹配会点进去
+    出不来（点击后页面不变，于是每轮都重复点同一处）。
+    """
+    return find_text_by_keywords(items, COIN_ENTRY_KEYWORDS, skip_nav_titles=True)
 
 
 def keyword_center(item: OcrItem, keyword: str) -> tuple[int, int] | None:
