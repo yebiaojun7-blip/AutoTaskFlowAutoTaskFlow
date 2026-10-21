@@ -359,6 +359,16 @@ COIN_ENTRY_KEYWORDS = ("淘金币", "领金币", "我的淘金币")
 # 首页按返回键会直接退出淘宝，促销浮层则必须按返回才能关掉，两者处理相反。
 TB_HOME_MARKERS = ("搜索", "推荐", "关注", "购物车")
 
+# 淘宝首页上的促销弹层会把首页入口盖住，但 OCR 仍可能识别到弹层后面的
+# 「搜索」「推荐」和「淘金币」。命中这些弹层文案时必须先关掉当前层，再重扫首页。
+PROMO_LAYER_MARKERS = (
+    "提前领好券",
+    "惊喜券",
+    "至高领",
+    "双11狂欢",
+    "立即抢",
+)
+
 # 今日任务全部完成时弹窗的特征词。
 # 真机实测：弹窗标题「今日速赚570淘金币」，正文「今日快速赚奖励已拿完」「记得明天再来」。
 # OCR 有时把正文拆成几段，所以用「奖励已拿完」这种不含数字的短片段做匹配。
@@ -399,6 +409,11 @@ def coin_home_visible(items: Iterable[OcrItem]) -> bool:
 def taobao_home_visible(items: Iterable[OcrItem]) -> bool:
     """当前屏是否是淘宝 App 首页（不是促销浮层，也不是淘金币页面）。"""
     return panel_visible(items, TB_HOME_MARKERS)
+
+
+def promo_layer_visible(items: Iterable[OcrItem]) -> bool:
+    """当前屏是否有盖住淘宝首页入口的促销弹层。"""
+    return panel_visible(items, PROMO_LAYER_MARKERS)
 
 
 # 跳出淘宝时的确认框。真机实测有三种：

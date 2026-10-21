@@ -882,6 +882,7 @@ class CoinEntryTest(unittest.TestCase):
         self.assertIsNotNone(panel.coin_entry_point(items))
         # 促销浮层不是首页，不能被当成首页去点入口。
         self.assertFalse(panel.taobao_home_visible(panel.parse_ocr_items(self.PROMO)))
+        self.assertTrue(panel.promo_layer_visible(panel.parse_ocr_items(self.PROMO)))
 
     def test_recover_clicks_keyword_position_on_home(self) -> None:
         """停在淘宝首页时，应按关键词位置点「淘金币」进入面板。"""
@@ -903,6 +904,16 @@ class CoinEntryTest(unittest.TestCase):
         self.assertTrue(result)
         self.assertIn(4, context.controller.keys)
         self.assertEqual(context.controller.clicks, [])
+
+    def test_recover_closes_promo_before_clicking_home_entry(self) -> None:
+        """弹层仍识别出首页文字时，也必须先关弹层再点入口。"""
+        promo_on_home = self.PROMO + self.MERGED + [text_item("搜索", 593, 168, 73, 44)]
+        context = FakeContext([promo_on_home, self.MERGED + [text_item("搜索", 593, 168, 73, 44)], PANEL_ROW, DONE_ONLY])
+        result = actions.open_coin_page(context, fast_config())
+
+        self.assertTrue(result)
+        self.assertIn(4, context.controller.keys)
+        self.assertEqual(context.controller.clicks[0], (314, 457))
 
 
 class AppUserTest(unittest.TestCase):

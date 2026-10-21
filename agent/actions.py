@@ -449,6 +449,11 @@ def _recover_to_panel(context: Any, config: dict[str, Any], *, tries: int = 6) -
             _back(context)
             continue
 
+        if panel.promo_layer_visible(items):
+            LOGGER.info("识别到淘宝促销弹层，返回关闭后重新扫描")
+            _back(context)
+            continue
+
         if panel.coin_home_visible(items):
             entry = panel.find_text_by_keywords(items, panel.COIN_HOME_ENTRY)
             if entry is not None:
