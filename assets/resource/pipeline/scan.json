@@ -4,12 +4,6 @@
     "action": "DoNothing",
     "timeout": 10000
   },
-  "SearchBoxOcr": {
-    "recognition": "OCR",
-    "expected": ["搜索", "搜一搜", "请输入"],
-    "action": "DoNothing",
-    "timeout": 10000
-  },
   "DailyTaskLoop": {
     "recognition": "DirectHit",
     "action": "Custom",

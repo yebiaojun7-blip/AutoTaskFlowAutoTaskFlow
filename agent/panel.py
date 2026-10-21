@@ -280,6 +280,40 @@ OFFSITE_APPS = {
     "快手": "com.smile.gifmaker",
 }
 
+# 搜索框的锚文本。淘宝这一栏会写成「搜索宝贝」「搜你想知道的宝贝」这类整句，
+# 所以用包含匹配；同时限长度，避免把面板任务名「搜一搜你心仪的宝贝」当成输入框。
+SEARCH_BOX_HINTS = ("搜索", "搜一搜", "请输入")
+SEARCH_BOX_MAX_LEN = 8
+
+# 提交搜索用的按钮文案。输入框本身也可能写着「搜索」，所以调用方要后找它。
+SEARCH_SUBMIT_WORDS = ("搜索一下", "搜索", "搜")
+
+
+def search_box(items: Iterable[OcrItem]) -> OcrItem | None:
+    """定位搜索输入框：命中锚文本，且整块文案足够短。
+
+    长度上限是关键：面板上的任务名「搜一搜你心仪的宝贝」也含锚文本，
+    但它比输入框长得多，限长后就不会被误点。
+    """
+    for item in items:
+        text = normalize_text(item.text)
+        if not text or len(text) > SEARCH_BOX_MAX_LEN:
+            continue
+        if any(word in text for word in SEARCH_BOX_HINTS):
+            return item
+    return None
+
+
+def search_submit_button(items: Iterable[OcrItem]) -> OcrItem | None:
+    """定位提交搜索的按钮；淘宝有时根本没有按钮，只能靠回车提交。"""
+    wanted = [normalize_text(word) for word in SEARCH_SUBMIT_WORDS]
+    for word in wanted:
+        for item in items:
+            if normalize_text(item.text) == word:
+                return item
+    return None
+
+
 def required_package(task_text: str) -> str | None:
     """这个任务要点「打开」跳哪个应用；不需要外部应用时返回 None。
 
@@ -361,13 +395,20 @@ TB_HOME_MARKERS = ("搜索", "推荐", "关注", "购物车")
 
 # 淘宝首页上的促销弹层会把首页入口盖住，但 OCR 仍可能识别到弹层后面的
 # 「搜索」「推荐」和「淘金币」。命中这些弹层文案时必须先关掉当前层，再重扫首页。
+#
+# 这里只放**弹层专属**的文案：真机实测首页顶部的「双11开门红|券后低至7.2折」
+# 横幅上就有「立即抢>」，把它当特征词会让正常首页被当成弹层，处理方式却相反
+# （弹层要按返回，首页要按返回就退出淘宝），主循环于是反复退出-重开淘宝。
 PROMO_LAYER_MARKERS = (
     "提前领好券",
     "惊喜券",
     "至高领",
     "双11狂欢",
-    "立即抢",
 )
+
+# 弹层判定同样要求多个特征词：首页在不同活动期间会零星出现单个活动词
+# （如顶栏的「双11狂欢」），单个命中不足以说明入口被盖住。
+PROMO_LAYER_MIN_HITS = 2
 
 # 今日任务全部完成时弹窗的特征词。
 # 真机实测：弹窗标题「今日速赚570淘金币」，正文「今日快速赚奖励已拿完」「记得明天再来」。
@@ -413,7 +454,7 @@ def taobao_home_visible(items: Iterable[OcrItem]) -> bool:
 
 def promo_layer_visible(items: Iterable[OcrItem]) -> bool:
     """当前屏是否有盖住淘宝首页入口的促销弹层。"""
-    return panel_visible(items, PROMO_LAYER_MARKERS)
+    return panel_visible(items, PROMO_LAYER_MARKERS, min_hits=PROMO_LAYER_MIN_HITS)
 
 
 # 跳出淘宝时的确认框。真机实测有三种：

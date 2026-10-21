@@ -450,6 +450,68 @@ class DailyLoopTest(unittest.TestCase):
         self.assertLessEqual(len(context.controller.clicks), 2)
 
 
+class SearchTaskTest(unittest.TestCase):
+    """搜索类任务：页面渲染慢、没有提交按钮、找不到输入框三种情况都要正确处理。"""
+
+    SEARCH_PANEL = [
+        text_item("赚金币抵钱", 100, 150, 300, 48),
+        text_item("今日累计奖励", 100, 220, 240, 40),
+        text_item("搜一搜你心仪的宝贝(0/3)", 45, 313, 252, 23),
+        text_item("浏览15秒", 45, 350, 120, 23),
+        text_item("+90", 594, 325, 60, 31),
+    ]
+
+    # 点完任务按钮后淘宝先出一张空白加载页，搜索框要晚一拍才渲染出来。
+    LOADING = [text_item("加载中", 300, 600, 120, 30)]
+    BOX = [text_item("搜索宝贝", 300, 120, 400, 60)]
+    SUBMIT = [text_item("搜索一下", 600, 120, 120, 60)]
+
+    def setUp(self) -> None:
+        # 等待重试的间隔在真机上是秒级，测试里必须跳过，否则每个用例白等好几秒。
+        self._original_sleep = actions._sleep
+        actions._sleep = lambda seconds: None
+
+    def tearDown(self) -> None:
+        actions._sleep = self._original_sleep
+
+    def test_panel_task_name_is_not_a_search_box(self) -> None:
+        """面板上的任务名「搜一搜你心仪的宝贝」含锚文本，但不是输入框。"""
+        items = panel.parse_ocr_items(self.SEARCH_PANEL)
+        self.assertIsNone(panel.search_box(items))
+        self.assertIsNotNone(panel.search_box(panel.parse_ocr_items(self.BOX)))
+
+    def test_search_box_is_found_after_page_finishes_rendering(self) -> None:
+        screens = [self.SEARCH_PANEL, self.LOADING, self.LOADING, self.BOX, self.SUBMIT, DONE_ONLY]
+        context = FakeContext(screens)
+
+        actions.run_daily_loop(context, fast_config(), max_rounds=1)
+
+        # 加载页出现时不能放弃，必须等到搜索框渲染出来再输入。
+        self.assertEqual(len(context.controller.inputs), 1)
+        self.assertIn(context.controller.inputs[0], load_config()["search_keywords"])
+
+    def test_search_without_submit_button_is_committed_by_enter(self) -> None:
+        screens = [self.SEARCH_PANEL, self.BOX, DONE_ONLY, DONE_ONLY]
+        context = FakeContext(screens)
+
+        actions.run_daily_loop(context, fast_config(), max_rounds=1)
+
+        self.assertEqual(len(context.controller.inputs), 1)
+        # KEYCODE_ENTER = 66；只靠输入框回车提交，否则停在输入法上不算搜过。
+        self.assertIn(66, context.controller.keys)
+
+    def test_search_box_never_appears_is_not_counted_as_done(self) -> None:
+        """找不到输入框时不能算完成任务，否则主循环会反复重跑同一个任务。"""
+        screens = [self.SEARCH_PANEL] + [self.LOADING] * 8
+        context = FakeContext(screens)
+
+        actions.run_daily_loop(context, fast_config(), max_rounds=1)
+
+        self.assertEqual(context.controller.inputs, [])
+        # 没搜过就必须退出来，不能停在加载页上。
+        self.assertIn(4, context.controller.keys)
+
+
 class DwellScrollTest(unittest.TestCase):
     """清单 / 会场 / 课堂这类页面静止不动就不再计时长，停留期间必须滑动。"""
 
@@ -573,6 +635,32 @@ COIN_HOME = [
     text_item("升级赛车拿钱", 242, 605, 238, 51),
     text_item("赚金币", 25, 651, 85, 35),
     text_item("赚能量", 613, 650, 84, 36),
+]
+
+# 真机截图（一加 Ace 3 PJE110 / 淘宝 2026-10-21，淘宝首页）：坐标原样抄自 probe 日志。
+# 关键点：顶部横幅带「立即抢>」，顶栏还有「双11穿」，都不是遮住入口的促销弹层；
+# 「领淘金币」是第一排最左的图标，必须按关键词折算点击位置。
+DEVICE_HOME = [
+    text_item("关注", 25, 89, 74, 46),
+    text_item("推荐", 114, 85, 85, 55),
+    text_item("闪购外卖", 218, 94, 121, 36),
+    text_item("盒马", 347, 94, 72, 36),
+    text_item("国补", 427, 94, 72, 36),
+    text_item("飞猪", 509, 94, 71, 36),
+    text_item("双11穿", 581, 90, 119, 42),
+    text_item("搜索", 593, 168, 73, 43),
+    text_item("领淘金币", 24, 320, 102, 29),
+    text_item("芭芭农场", 147, 320, 106, 29),
+    text_item("红包签到", 271, 320, 109, 29),
+    text_item("淘宝闪购", 395, 320, 108, 28),
+    text_item("天猫超市", 522, 320, 108, 29),
+    text_item("双11开门红|券后低至7.2折", 24, 678, 453, 44),
+    text_item("立即抢>", 491, 683, 105, 36),
+    text_item("购物金充值膨胀", 482, 763, 193, 33),
+    text_item("88VIP无门槛券", 371, 1179, 326, 56),
+    text_item("券额至高", 387, 1258, 87, 29),
+    text_item("购物车", 467, 1516, 73, 31),
+    text_item("我的淘宝", 594, 1516, 98, 35),
 ]
 
 
@@ -845,6 +933,24 @@ class HomeMisjudgeTest(unittest.TestCase):
         only_one = panel.parse_ocr_items([text_item("赚金币抵钱", 100, 120, 300, 48)])
         self.assertFalse(panel.task_panel_visible(only_one))
 
+    def test_home_banner_with_grab_button_is_not_a_promo_layer(self) -> None:
+        """真机首页顶部的「双11开门红」横幅带「立即抢」，不是遮住入口的弹层。"""
+        banner = panel.parse_ocr_items(
+            [
+                text_item("双11开门红|券后低至7.2折", 24, 678, 453, 44),
+                text_item("立即抢>", 491, 683, 105, 36),
+            ]
+        )
+        self.assertFalse(panel.promo_layer_visible(banner))
+        # 真正的弹层同时命中多个专属文案，仍然要判出来。
+        layer = panel.parse_ocr_items(
+            [
+                text_item("双11提前领好券", 85, 100, 225, 40),
+                text_item("苹果惊喜券至高领450元", 33, 259, 317, 39),
+            ]
+        )
+        self.assertTrue(panel.promo_layer_visible(layer))
+
     def test_home_search_box_is_not_a_task(self) -> None:
         """首页上的「搜索」框不能被当成搜索任务去点击。"""
         config = load_config()
@@ -914,6 +1020,19 @@ class CoinEntryTest(unittest.TestCase):
         self.assertTrue(result)
         self.assertIn(4, context.controller.keys)
         self.assertEqual(context.controller.clicks[0], (314, 457))
+
+    def test_recover_does_not_press_back_on_real_home(self) -> None:
+        """真机淘宝首页带有「立即抢」横幅，仍必须直接点「淘金币」而不是按返回退出。"""
+        home = DEVICE_HOME
+        context = FakeContext([home, PANEL_ROW, DONE_ONLY])
+        result = actions.open_coin_page(context, fast_config())
+
+        self.assertTrue(result)
+        self.assertNotIn(4, context.controller.keys)
+        # 「领淘金币」在首排左起第一个，中心 x 应远小于整块中心。
+        self.assertTrue(context.controller.clicks)
+        x, y = context.controller.clicks[0]
+        self.assertLess(x, 200)
 
 
 class AppUserTest(unittest.TestCase):

@@ -82,6 +82,18 @@ def _back(context: Any, *, delay: float = 1.2) -> None:
     _sleep(delay)
 
 
+# Android KEYCODE_ENTER。搜索框没有提交按钮时用它提交，
+# 但**不能**用它来误当输入完成信号：输入法弹窗里也能触发。
+_KEYCODE_ENTER = 66
+
+
+def _enter(context: Any, *, delay: float = 1.0) -> None:
+    """按一次回车，用于提交搜索。"""
+    LOGGER.info("按下回车")
+    _controller(context).post_click_key(_KEYCODE_ENTER).wait()
+    _sleep(delay)
+
+
 # 滑动手势必须落在这个纵向区间里。
 # 下边留到 0.85：再往下是系统手势导航条和淘宝底部标签栏，手指按在那里会被
 # 当成返回/切页手势，整次滑动直接被吞掉（实测 0.92 以下 diff 从 72 跌到 0.13）。
@@ -210,31 +222,72 @@ def _screen_size(context: Any) -> tuple[int, int]:
     return _FALLBACK_FRAME
 
 
-def _run_search(context: Any, keyword: str, config: dict[str, Any], image: Any) -> None:
-    """搜索任务：当前页找输入框 → 输入关键词 → 点搜索 → 停留 → 返回。
+def _wait_for(predicate: Any, context: Any, *, tries: int, delay: float) -> list[panel.OcrItem]:
+    """反复截图 + OCR，直到 predicate(items) 为真；返回最后一次的识别结果。
 
-    淘宝搜索入口的文案与位置随版本变化，因此这里只在找到疑似输入框时才输入，
-    否则退化为"停留 + 返回"，不会因为找不到输入框而卡死。
+    「点完任务按钮立刻找搜索框」是行不通的：淘宝要先把搜索页渲染出来，
+    那一刻 OCR 只拿到一个空白页，于是判定「找不到输入框」，搜索任务被静默
+    退化成「停留 + 返回」—— 页面没搜过，奖励自然一分不拿。
     """
-    items = _ocr_items(context, image, "SearchBoxOcr")
-    hint = panel.find_text_by_keywords(items, ("搜索", "搜一搜", "请输入"))
-    if hint and keyword:
-        _click_item(context, hint, delay=0.8)
-        LOGGER.info("输入搜索关键词: %s", keyword)
-        _controller(context).post_input_text(keyword).wait()
-        _sleep(0.6)
-        for item in _ocr_items(context, _screencap(context), "SearchBoxOcr"):
-            if panel.normalize_text(item.text) in ("搜索", "搜索一下", "搜"):
-                _click_item(context, item, delay=1.5)
-                break
-    else:
-        LOGGER.info("未定位到搜索框，仅停留后返回")
+    items: list[panel.OcrItem] = []
+    for attempt in range(tries):
+        items = _scan(context)
+        if predicate(items):
+            return items
+        if attempt + 1 < tries:
+            _sleep(delay)
+    return items
 
-    # 搜索结果页同样要滑着才算浏览，界面静止不计时长。
-    total = panel.dwell_seconds("jump", config)
+
+def _run_search(
+    context: Any,
+    keyword: str,
+    config: dict[str, Any],
+    *,
+    required: float = 0.0,
+) -> bool:
+    """搜索任务：找到输入框 → 输入关键词 → 提交 → 在结果页停留 → 返回。
+
+    返回是否真的提交了搜索。没提交时调用方要把这次算作失败而不是完成 ——
+    页面没搜过，进度不会涨，当成成功只会反复重跑同一个任务。
+
+    required 是任务自己写明的浏览秒数（「浏览15秒」），搜索后要按它停留，
+    不能只用配置里的兜底值：搜索任务的奖励挂在「搜完再浏览」这一步上。
+    """
+    items = _wait_for(panel.search_box, context, tries=6, delay=1.5)
+    box = panel.search_box(items)
+    if box is None:
+        LOGGER.warning("未定位到搜索框，只能停留后返回（这次搜索不计入完成）")
+        _dwell(context, panel.dwell_seconds("jump", config), scroll=True)
+        _back(context)
+        return False
+
+    if not keyword:
+        LOGGER.warning("没有可用的搜索关键词，跳过输入")
+        _back(context)
+        return False
+
+    _click_item(context, box, delay=1.2)
+    LOGGER.info("输入搜索关键词: %s", keyword)
+    _controller(context).post_input_text(keyword).wait()
+    _sleep(0.8)
+
+    # 提交有两种形态：搜索结果页上的「搜索」按钮，或者干脆没有按钮只能回车。
+    # 先找按钮，找不到就发一次回车 —— 淘宝的搜索框回车就是提交。
+    submit = panel.search_submit_button(_scan(context))
+    if submit is not None:
+        LOGGER.info("点击「%s」提交搜索", submit.text)
+        _click_item(context, submit, delay=1.8)
+    else:
+        LOGGER.info("没有搜索按钮，用回车提交")
+        _enter(context, delay=1.8)
+
+    # 结果页同样要滑着才算浏览，界面静止不计时长。
+    total = panel.dwell_seconds("jump", config, required)
     LOGGER.info("搜索结果页停留 %.1f 秒", total)
     _dwell(context, total, scroll=True)
     _back(context)
+    return True
 
 
 def _run_task(
@@ -243,19 +296,22 @@ def _run_task(
     config: dict[str, Any],
     button: panel.OcrItem,
     items: list[panel.OcrItem],
-) -> None:
+) -> bool:
     """点击任务按钮并按任务类型等待，然后返回任务面板。
 
     items 是面板上已识别出来的内容，用来读任务自己写明的停留要求，
     避免为了这个再截一次图。
+
+    返回这次任务是否真的做成了。搜索类没提交成搜索时返回 False：
+    页面没搜过，进度不会涨，当成成功会让主循环反复重跑同一个任务。
     """
     kind = pick.decision.kind
     _click_item(context, button, delay=1.5)
 
     if kind == "search":
         keyword = pick.decision.search_keyword or panel.search_keyword(config)
-        _run_search(context, keyword, config, _screencap(context))
-        return
+        required = panel.required_seconds(items, pick.item)
+        return _run_search(context, keyword, config, required=required)
 
     # 跳转类任务（蚂蚁庄园 / 蚂蚁森林 / 跳闲鱼 / 站外页）点下去会弹确认框，
     # 要真的点确认进去做，不能取消：取消就是放弃任务。
@@ -276,6 +332,7 @@ def _run_task(
     # 浏览类和跳转到的会场页都是靠页面在动才累计，停留期间必须持续滑动。
     _dwell(context, total, scroll=kind in ("browse", "jump"))
     _back(context)
+    return True
 
 
 def _scan(context: Any, node: str = "PanelFullOcr") -> list[panel.OcrItem]:
@@ -587,8 +644,12 @@ def run_daily_loop(context: Any, config: dict[str, Any], *, max_rounds: int = DE
             pick.decision.kind,
             button.text,
         )
-        _run_task(context, pick, config, button, items)
-        completed += 1
+        ok = _run_task(context, pick, config, button, items)
+        if ok:
+            completed += 1
+        else:
+            # 搜索没提交成功：页面根本没搜过，算完成只会让主循环不停地重跑同一个任务。
+            LOGGER.warning("任务「%s」未能真正执行，不计入完成", pick.item.text)
         empty_rounds = 0
 
         if not _recover_to_panel(context, config):
