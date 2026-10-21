@@ -280,28 +280,46 @@ OFFSITE_APPS = {
     "快手": "com.smile.gifmaker",
 }
 
-# 搜索框的锚文本。淘宝这一栏会写成「搜索宝贝」「搜你想知道的宝贝」这类整句，
-# 所以用包含匹配；同时限长度，避免把面板任务名「搜一搜你心仪的宝贝」当成输入框。
-SEARCH_BOX_HINTS = ("搜索", "搜一搜", "请输入")
+# 搜索框的锚文本。淘宝的搜索栏写的是「搜索宝贝」「搜索商品」这种
+# 「搜索 + 你要搜的东西」；而页面顶部的推广横幅写的是「搜索有福利」
+# 「搜索后浏览立得奖励」，是「搜索 + 收益」。
+#
+# 真机实测（一加 Ace 3 / 淘宝 2026-10）只按「搜索」两个字做包含匹配会命中横幅：
+# 横幅的纵坐标比搜索栏高 100 像素，点下去输入框拿不到焦点，接着敲进去的
+# 关键词直接丢掉，最后按「搜索」搜的是个空框 —— 进度永远停在 (1/3)。
+# 所以锚点必须是完整短语，不能是裸的「搜索」。
+SEARCH_BOX_HINTS = ("搜索宝贝", "搜索商品", "搜你想知道的", "请输入", "搜一搜")
+
+# 面板上的任务名「搜一搜你心仪的宝贝(1/3)」也含锚文本，靠长度上限挡掉。
 SEARCH_BOX_MAX_LEN = 8
 
 # 提交搜索用的按钮文案。输入框本身也可能写着「搜索」，所以调用方要后找它。
 SEARCH_SUBMIT_WORDS = ("搜索一下", "搜索", "搜")
 
 
-def search_box(items: Iterable[OcrItem]) -> OcrItem | None:
+def search_box(
+    items: Iterable[OcrItem], submit: OcrItem | None = None
+) -> OcrItem | None:
     """定位搜索输入框：命中锚文本，且整块文案足够短。
 
-    长度上限是关键：面板上的任务名「搜一搜你心仪的宝贝」也含锚文本，
-    但它比输入框长得多，限长后就不会被误点。
+    submit 是同一页上找到的提交按钮。给了按钮就再要求输入框与它同一行：
+    搜索栏是输入框和「搜索」按钮并排的一行，页面别处的横幅不在这一行上。
+    两道条件都过才返回，避免关键词敲进一个没有焦点的文本框。
     """
+    candidates: list[OcrItem] = []
     for item in items:
         text = normalize_text(item.text)
         if not text or len(text) > SEARCH_BOX_MAX_LEN:
             continue
         if any(word in text for word in SEARCH_BOX_HINTS):
-            return item
-    return None
+            candidates.append(item)
+    if submit is not None:
+        button_y = submit.center[1]
+        candidates = [
+            item for item in candidates
+            if abs(item.center[1] - button_y) <= ROW_TOLERANCE
+        ]
+    return candidates[0] if candidates else None
 
 
 def search_submit_button(items: Iterable[OcrItem]) -> OcrItem | None:

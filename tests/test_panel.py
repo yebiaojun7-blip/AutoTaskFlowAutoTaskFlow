@@ -434,8 +434,11 @@ class DailyLoopTest(unittest.TestCase):
             text_item("搜索商品", 100, 300),
             text_item("去完成", 900, 300, 120, 40),
         ]
-        search_box = [text_item("搜索", 300, 120, 400, 60)]
-        context = FakeContext([search_panel, search_box, DONE_ONLY, DONE_ONLY])
+        search_page = [
+            text_item("搜索宝贝", 107, 211, 145, 29),
+            text_item("搜索", 610, 207, 65, 38),
+        ]
+        context = FakeContext([search_panel, search_page, search_page, DONE_ONLY])
 
         actions.run_daily_loop(context, fast_config(), max_rounds=3)
 
@@ -461,10 +464,20 @@ class SearchTaskTest(unittest.TestCase):
         text_item("+90", 594, 325, 60, 31),
     ]
 
+    # 真机（一加 Ace 3 / 淘宝 2026-10）搜索页的整屏 OCR，坐标原样抄自日志。
+    # 顶部「搜索有福利」「搜索后浏览立得奖励」是推广横幅，真正的输入框是
+    # 和「搜索」按钮同一行的「Q搜索宝贝」（Q 是放大镜图标被认成了字母）。
+    SEARCH_PAGE = [
+        text_item("搜索有福利", 65, 112, 153, 29),
+        text_item("搜索后浏览立得奖励", 451, 108, 228, 28),
+        text_item("Q搜索宝贝", 107, 211, 145, 29),
+        text_item("搜索", 610, 207, 65, 38),
+        text_item("历史搜索", 20, 288, 126, 35),
+        text_item("搜索发现", 19, 536, 127, 34),
+    ]
+
     # 点完任务按钮后淘宝先出一张空白加载页，搜索框要晚一拍才渲染出来。
     LOADING = [text_item("加载中", 300, 600, 120, 30)]
-    BOX = [text_item("搜索宝贝", 300, 120, 400, 60)]
-    SUBMIT = [text_item("搜索一下", 600, 120, 120, 60)]
 
     def setUp(self) -> None:
         # 等待重试的间隔在真机上是秒级，测试里必须跳过，否则每个用例白等好几秒。
@@ -478,10 +491,34 @@ class SearchTaskTest(unittest.TestCase):
         """面板上的任务名「搜一搜你心仪的宝贝」含锚文本，但不是输入框。"""
         items = panel.parse_ocr_items(self.SEARCH_PANEL)
         self.assertIsNone(panel.search_box(items))
-        self.assertIsNotNone(panel.search_box(panel.parse_ocr_items(self.BOX)))
+        self.assertIsNotNone(panel.search_box(panel.parse_ocr_items(self.SEARCH_PAGE)))
+
+    def test_promo_banner_is_not_mistaken_for_the_search_box(self) -> None:
+        """「搜索有福利」这条横幅比搜索栏高 100 像素，点它关键词就丢了。
+
+        真机实测只按「搜索」两个字匹配会选中横幅，输入框没拿到焦点，
+        敲进去的关键词直接丢掉，进度一直停在 (1/3)。
+        """
+        items = panel.parse_ocr_items(self.SEARCH_PAGE)
+        submit = panel.search_submit_button(items)
+        self.assertIsNotNone(submit)
+
+        box = panel.search_box(items, submit)
+
+        self.assertIsNotNone(box)
+        self.assertIn("搜索宝贝", box.text)
+        # 点击坐标必须落在搜索栏（y 约 225），而不是横幅（y 约 126）。
+        self.assertGreater(box.center[1], 180)
 
     def test_search_box_is_found_after_page_finishes_rendering(self) -> None:
-        screens = [self.SEARCH_PANEL, self.LOADING, self.LOADING, self.BOX, self.SUBMIT, DONE_ONLY]
+        screens = [
+            self.SEARCH_PANEL,
+            self.LOADING,
+            self.LOADING,
+            self.SEARCH_PAGE,
+            self.SEARCH_PAGE,
+            DONE_ONLY,
+        ]
         context = FakeContext(screens)
 
         actions.run_daily_loop(context, fast_config(), max_rounds=1)
@@ -490,14 +527,26 @@ class SearchTaskTest(unittest.TestCase):
         self.assertEqual(len(context.controller.inputs), 1)
         self.assertIn(context.controller.inputs[0], load_config()["search_keywords"])
 
-    def test_search_without_submit_button_is_committed_by_enter(self) -> None:
-        screens = [self.SEARCH_PANEL, self.BOX, DONE_ONLY, DONE_ONLY]
+    def test_search_is_committed_by_clicking_the_submit_button(self) -> None:
+        screens = [self.SEARCH_PANEL, self.SEARCH_PAGE, self.SEARCH_PAGE, DONE_ONLY]
         context = FakeContext(screens)
 
         actions.run_daily_loop(context, fast_config(), max_rounds=1)
 
         self.assertEqual(len(context.controller.inputs), 1)
-        # KEYCODE_ENTER = 66；只靠输入框回车提交，否则停在输入法上不算搜过。
+        # 输入框中心 (179,225) 之后应当点提交按钮 (642,226)。
+        self.assertIn((642, 226), context.controller.clicks)
+
+    def test_search_without_submit_button_is_committed_by_enter(self) -> None:
+        """淘宝的搜索页有时没有按钮，只能靠回车提交。"""
+        no_button = [item for item in self.SEARCH_PAGE if item["text"] != "搜索"]
+        screens = [self.SEARCH_PANEL] + [no_button] * 8 + [DONE_ONLY]
+        context = FakeContext(screens)
+
+        actions.run_daily_loop(context, fast_config(), max_rounds=1)
+
+        self.assertEqual(len(context.controller.inputs), 1)
+        # KEYCODE_ENTER = 66；不发回车就停在输入法上，等于没搜。
         self.assertIn(66, context.controller.keys)
 
     def test_search_box_never_appears_is_not_counted_as_done(self) -> None:
@@ -555,8 +604,11 @@ class DwellScrollTest(unittest.TestCase):
             text_item("搜索商品", 100, 300),
             text_item("去完成", 900, 300, 120, 40),
         ]
-        search_box = [text_item("搜索", 300, 120, 400, 60)]
-        context = FakeContext([search_panel, search_box, DONE_ONLY, DONE_ONLY])
+        search_page = [
+            text_item("搜索宝贝", 107, 211, 145, 29),
+            text_item("搜索", 610, 207, 65, 38),
+        ]
+        context = FakeContext([search_panel, search_page, search_page, DONE_ONLY])
         original = actions._sleep
         actions._sleep = lambda seconds: None
         try:

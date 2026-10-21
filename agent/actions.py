@@ -254,16 +254,22 @@ def _run_search(
     required 是任务自己写明的浏览秒数（「浏览15秒」），搜索后要按它停留，
     不能只用配置里的兜底值：搜索任务的奖励挂在「搜完再浏览」这一步上。
     """
-    items = _wait_for(panel.search_box, context, tries=6, delay=1.5)
-    box = panel.search_box(items)
-    if box is None:
-        LOGGER.warning("未定位到搜索框，只能停留后返回（这次搜索不计入完成）")
-        _dwell(context, panel.dwell_seconds("jump", config), scroll=True)
-        _back(context)
-        return False
+    # 先等提交按钮出现，再按它的行去定位输入框：页面顶部的推广横幅也写着
+    # 「搜索有福利」，只认「搜索」两个字会点到横幅上，输入框拿不到焦点，
+    # 关键词敲进去就丢了（真机实测进度一直停在 1/3）。
+    items = _wait_for(
+        lambda current: panel.search_submit_button(current) is not None,
+        context,
+        tries=6,
+        delay=1.5,
+    )
+    submit = panel.search_submit_button(items)
+    box = panel.search_box(items, submit)
 
-    if not keyword:
-        LOGGER.warning("没有可用的搜索关键词，跳过输入")
+    if box is None or not keyword:
+        reason = "未定位到搜索框" if box is None else "没有可用的搜索关键词"
+        LOGGER.warning("%s，只能停留后返回（这次搜索不计入完成）", reason)
+        _dwell(context, panel.dwell_seconds("jump", config), scroll=True)
         _back(context)
         return False
 
@@ -272,8 +278,8 @@ def _run_search(
     _controller(context).post_input_text(keyword).wait()
     _sleep(0.8)
 
-    # 提交有两种形态：搜索结果页上的「搜索」按钮，或者干脆没有按钮只能回车。
-    # 先找按钮，找不到就发一次回车 —— 淘宝的搜索框回车就是提交。
+    # 输入完成后弹出输入法，搜索栏位置会变，提交按钮要重新找一次。
+    # 淘宝的搜索页有时根本没有按钮，那就发一次回车 —— 搜索框回车就是提交。
     submit = panel.search_submit_button(_scan(context))
     if submit is not None:
         LOGGER.info("点击「%s」提交搜索", submit.text)
