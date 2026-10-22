@@ -382,6 +382,56 @@ class PickTaskTest(unittest.TestCase):
         self.assertTrue(panel.panel_visible(panel.parse_ocr_items(PANEL_ROW)))
         self.assertFalse(panel.panel_visible(panel.parse_ocr_items([text_item("商品详情", 100, 100)])))
 
+    def test_task_done_but_unclaimed_is_not_picked(self) -> None:
+        """(2/2) 的行奖励已做满、只是还没领，点进去只会白耗一轮。"""
+        items = panel.parse_ocr_items(
+            [
+                text_item("赚金币抵钱", 100, 150, 300, 48),
+                text_item("逛清单，每15秒30金币(2/2)", 100, 300),
+                text_item("去完成", 900, 300, 120, 40),
+                text_item("浏览商品(0/5)", 100, 400),
+                text_item("去完成", 900, 400, 120, 40),
+            ]
+        )
+        pick = panel.pick_task(items, self.config)
+        assert pick.item is not None
+        self.assertEqual(pick.item.text, "浏览商品(0/5)")
+        self.assertTrue(any("逛清单" in entry for entry in pick.skipped))
+
+    def test_task_finished_reads_progress(self) -> None:
+        self.assertTrue(panel.task_finished("逛清单，每15秒30金币(2/2)"))
+        self.assertFalse(panel.task_finished("逛清单，每15秒30金币(1/2)"))
+        # 没有 (x/y) 的任务判断不了是否做满，不能当成已完成。
+        self.assertFalse(panel.task_finished("任务到访得金币"))
+
+    def test_in_progress_task_is_preferred_over_earlier_one(self) -> None:
+        """排在前面的任务可能永远推不动，先做能推进的那个。"""
+        items = panel.parse_ocr_items(
+            [
+                text_item("赚金币抵钱", 100, 150, 300, 48),
+                text_item("任务到访得金币", 100, 280),
+                text_item("去完成", 900, 280, 120, 40),
+                text_item("浏览商品(1/5)", 100, 400),
+                text_item("去完成", 900, 400, 120, 40),
+            ]
+        )
+        pick = panel.pick_task(items, self.config)
+        assert pick.item is not None
+        self.assertEqual(pick.item.text, "浏览商品(1/5)")
+
+
+class FindProgressTest(unittest.TestCase):
+    def test_reuses_given_ocr_result_instead_of_rescanning(self) -> None:
+        """每轮多截一张整屏再 OCR 一次，在真机上就是几十秒的总代价。"""
+        context = FakeContext(PANEL_ROW)
+        items = panel.parse_ocr_items(DEVICE_PANEL)
+        before = context.controller.index
+
+        progress = actions._find_progress(context, "逛清单，每15秒30金币", seen=items)
+
+        self.assertEqual(progress, (0, 2))
+        self.assertEqual(context.controller.index, before, "给 seen 时不应再截图")
+
 
 class DailyLoopTest(unittest.TestCase):
     def test_browse_task_is_clicked_then_loop_ends(self) -> None:
@@ -1367,24 +1417,16 @@ class ProgressTest(unittest.TestCase):
                 text_item("去完成", 900, 300, 120, 40),
             ]
 
-        # 进度在涨就一直做下去，不应被 max_attempts_per_task 提前放弃。
-        screens = [
-            panel_with(0),
-            panel_with(1),
-            panel_with(1),
-            panel_with(1),
-            panel_with(2),
-            panel_with(2),
-            panel_with(2),
-            panel_with(3),
-            panel_with(3),
-            panel_with(3),
-        ]
+        # 有进展就重置尝试次数，所以进度只要在 max_attempts_per_task 之内涨起来
+        # 就不会被放弃。每轮消耗一张截图（面板复用上一轮的识别结果），
+        # 这里按轮次推进进度，做到 3/3 全部完成。
+        screens = [panel_with(p) for p in (0, 1, 2, 3, 3, 3, 3)]
         context = FakeContext(screens)
         result = actions.run_daily_loop(context, fast_config(), max_rounds=10)
 
         self.assertTrue(result)
-        self.assertGreaterEqual(len(context.controller.clicks), 3)
+        # 0/3、1/3、2/3 各做一次；3/3 已做满不再点。
+        self.assertEqual(len(context.controller.clicks), 3)
 
 
 class DwellRequirementTest(unittest.TestCase):

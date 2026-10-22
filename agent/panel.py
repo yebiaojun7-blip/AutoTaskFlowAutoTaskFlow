@@ -169,6 +169,17 @@ def is_subtitle(text: str) -> bool:
     return _SUBTITLE_RE.match(task_key(text)) is not None
 
 
+def task_finished(text: str) -> bool:
+    """任务名里的进度已经做满（「逛清单，每15秒30金币(2/2)」）。
+
+    「已完成」「已领取」是淘宝把按钮换掉之后才出现的文字，做满但还没领奖的
+    任务仍叫原名。只靠 classify_task 认那两个字，就会把 (2/2) 的行当成可执行
+    任务反复点进去——点了也没奖励，白耗一轮。
+    """
+    progress = task_progress(text)
+    return progress is not None and progress[1] > 0 and progress[0] >= progress[1]
+
+
 def _field(raw: Any, name: str, default: Any = None) -> Any:
     """兼容 MaaFramework 返回的 dict 与 dataclass 两种形态。"""
     if isinstance(raw, dict):
@@ -646,15 +657,21 @@ def pick_task(
     kinds: Sequence[str] | None = None,
     exclude: Collection[str] = (),
 ) -> PanelPick:
-    """按阅读顺序挑出第一个可执行任务。
+    """挑出一个可执行任务：先挑做到一半的，再按阅读顺序挑。
 
     黑名单、已完成等不可执行项会被记录到 skipped 中，便于日志排查。
     kinds 用于限定只挑选某一类任务（Pipeline 中区分搜索/浏览/跳转分支）。
     exclude 里的任务名会被跳过，用于放弃那些反复执行也不推进的任务。
+
+    排序刻意不是纯阅读顺序：面板上排在前面的任务可能永远推不动（例如
+    「任务到访得金币」这种没有 (x/y)、点了也不涨的），纯按顺序挑就会一直
+    挑中它，把轮次全耗在它身上，而下面那些真正还能推进的任务一次都轮不到。
+    做到一半的 (1/3) 已经证明能推进，先做完它更划算。
     """
     config = config or load_config()
     allowed = tuple(kinds) if kinds else EXECUTABLE_KINDS
     skipped: list[str] = []
+    candidates: list[tuple[int, OcrItem, TaskDecision]] = []
     for item in items:
         # 说明文字（「浏览15秒」「参与答题」「点击去逛」）不是任务，
         # 它就在任务名正下方，且「点击去逛」本身还命中 jump_tasks 名单，
@@ -666,10 +683,22 @@ def pick_task(
             skipped.append(f"{item.text}(已放弃)")
             continue
         decision = classify_task(item.text, config)
-        if decision.kind in allowed:
-            return PanelPick(decision, item, tuple(skipped))
-        skipped.append(f"{item.text}({decision.reason or decision.kind})")
-    return PanelPick(TaskDecision("none", reason="当前屏没有可执行任务"), None, tuple(skipped))
+        if decision.kind not in allowed:
+            skipped.append(f"{item.text}({decision.reason or decision.kind})")
+            continue
+        if task_finished(item.text):
+            skipped.append(f"{item.text}(已做满)")
+            continue
+        progress = task_progress(item.text)
+        # 0 = 做到一半的优先，1 = 还没开始的，保持 discover 顺序稳定。
+        rank = 0 if progress is not None and progress[0] > 0 else 1
+        candidates.append((rank, item, decision))
+
+    if not candidates:
+        return PanelPick(TaskDecision("none", reason="当前屏没有可执行任务"), None, tuple(skipped))
+    candidates.sort(key=lambda entry: entry[0])
+    _, item, decision = candidates[0]
+    return PanelPick(decision, item, tuple(skipped))
 
 
 def find_action_button(

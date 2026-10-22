@@ -18,9 +18,16 @@ if _PI_ROOT not in sys.path:
 
 
 def _setup_logging() -> None:
+    # 必须写 stdout。basicConfig 默认走 stderr，而客户端把 agent 的 stderr 一律当成
+    # AgentError（红色报错档）——「第 2 轮：执行…」这种正常进度会全变成错误，
+    # 真正的 traceback 也就淹没在里面了。stderr 只留给解释器与加载器自己的异常。
+    #
+    # 不带时间戳：客户端日志面板每条本来就有一列时间，正文再带一遍就是
+    # 「11:33:10 2026-10-22 11:33:10,966 [INFO] …」两段时间。
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        stream=sys.stdout,
+        format="[%(levelname)s] %(name)s: %(message)s",
     )
 
 

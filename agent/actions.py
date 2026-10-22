@@ -526,8 +526,16 @@ def _open_app_dialog_action(context: Any, items: list[panel.OcrItem], *, tries: 
     return confirmed
 
 
-def _recover_to_panel(context: Any, config: dict[str, Any], *, tries: int = 6) -> bool:
-    """把界面拉回淘金币任务面板。
+def _recover_to_panel(
+    context: Any,
+    config: dict[str, Any],
+    *,
+    tries: int = 6,
+) -> list[panel.OcrItem] | None:
+    """把界面拉回淘金币任务面板，成功时返回面板上的识别结果。
+
+    返回识别结果而不是 bool，是为了让调用方省掉一次整屏 OCR：每轮本来就要
+    判任务进度，重新截一张图再跑一遍全屏 OCR 是纯浪费（真机上一次要好几秒）。
 
     只按返回键是回不去的，几种局面必须分开处理：
       1. 已在任务面板 —— 直接返回；
@@ -558,10 +566,10 @@ def _recover_to_panel(context: Any, config: dict[str, Any], *, tries: int = 6) -
             continue
 
         if panel.task_panel_visible(items):
-            return True
+            return items
         if panel.daily_done_visible(items):
             LOGGER.info("今日任务已全部完成，无需回到任务面板")
-            return True
+            return items
 
         if panel.team_page_visible(items):
             LOGGER.info("误入组队活动页，返回退出（该页面没有日常任务）")
@@ -620,7 +628,8 @@ def _recover_to_panel(context: Any, config: dict[str, Any], *, tries: int = 6) -
 
         _back(context)
 
-    return panel.task_panel_visible(_scan(context))
+    items = _scan(context)
+    return items if panel.task_panel_visible(items) else None
 
 
 def open_coin_page(context: Any, config: dict[str, Any]) -> bool:
@@ -655,9 +664,15 @@ def run_daily_loop(context: Any, config: dict[str, Any], *, max_rounds: int = DE
     # 整台手机上装了什么，用来挡掉「点了必然失败」的任务（例如本机没装今日头条）。
     # 每轮只查一次，取不到就退回空集合（等于不挡任何任务）。
     installed = _installed_packages(context)
+    # 上一轮收尾时已经是「面板 + 识别完成」的状态，界面在这之后没有任何操作，
+    # 直接交给下一轮用，省掉一次整屏 OCR（真机上一次要好几秒）。
+    pregained: list[panel.OcrItem] | None = None
 
     for round_index in range(1, max_rounds + 1):
-        items = _scan(context)
+        if pregained is not None:
+            items, pregained = pregained, None
+        else:
+            items = _scan(context)
 
         safety = panel.find_safety(items, config.get("safety_keywords", []))
         if safety:
@@ -671,7 +686,7 @@ def run_daily_loop(context: Any, config: dict[str, Any], *, max_rounds: int = DE
 
         if not panel.task_panel_visible(items):
             LOGGER.info("第 %d 轮：不在任务面板，尝试回到面板", round_index)
-            if not _recover_to_panel(context, config):
+            if _recover_to_panel(context, config) is None:
                 LOGGER.error("无法回到淘金币任务面板，停止任务")
                 return STOP_SIGNAL
             # 成功找回面板不算空轮次：否则 max_empty_rounds=1 时
@@ -736,16 +751,23 @@ def run_daily_loop(context: Any, config: dict[str, Any], *, max_rounds: int = DE
             LOGGER.warning("任务「%s」未能真正执行，不计入完成", pick.item.text)
         empty_rounds = 0
 
-        if not _recover_to_panel(context, config):
+        recovered = _recover_to_panel(context, config)
+        if recovered is None:
             LOGGER.warning("任务后未能回到任务面板")
 
         tried[name] = tried.get(name, 0) + 1
-        if _progress_stuck(context, name, tried[name], max_attempts, last_progress):
+        # 面板就在眼前时，用这一轮的识别结果判进度，不再单独截一张图：
+        # _find_progress 要整屏 OCR 一次，每轮多这一次就是几十秒的总代价。
+        if _progress_stuck(
+            context, name, tried, max_attempts, last_progress, seen=recovered
+        ):
             abandoned.add(name)
             LOGGER.warning(
                 "任务「%s」已尝试 %d 次仍无进展，本次跳过它", name, tried[name]
             )
 
+        # 到下一轮开始之间只有等待，界面不会再变，这份识别结果仍然有效。
+        pregained = recovered
         _sleep(_random_delay(config))
 
     LOGGER.info("达到轮次上限 %d，已执行 %d 个任务", max_rounds, completed)
@@ -755,33 +777,48 @@ def run_daily_loop(context: Any, config: dict[str, Any], *, max_rounds: int = DE
 def _progress_stuck(
     context: Any,
     name: str,
-    attempts: int,
+    tried: dict[str, int],
     max_attempts: int,
     last_progress: dict[str, tuple[int, int]],
+    *,
+    seen: list[panel.OcrItem] | None = None,
 ) -> bool:
     """判断某个任务是否该放弃。
 
     任务名里带 (x/y) 进度时以「进度有没有真正增长」为准：跟上一轮的值比，
-    变大了算有进展并刷新记录，没变大且已达尝试上限就放弃。
+    变大了算有进展、把这一任务的执行次数清回 1，然后再看次数。
+    不清回的后果是做到一半的任务会被次数耗死：「拍立淘(0/5)」每次都推进一格，
+    跑满 max_attempts 次后照样被放弃，而它明明只差最后一两格。
     不带进度时（例如「点击去逛+30」）只能看执行次数，到上限就放弃。
+
+    tried 由调用方持有并在这里就地更新，因为「有进展」要重置的就是它。
+    seen 是调用方刚拿到的面板识别结果，给了就不必再截一次图。
     """
-    progress = _find_progress(context, name)
+    progress = _find_progress(context, name, seen=seen)
     if progress is not None:
         previous = last_progress.get(name)
         last_progress[name] = progress
         if previous is not None and progress[0] > previous[0]:
+            tried[name] = 1
             return False
-    return attempts >= max_attempts
+    return tried.get(name, 0) >= max_attempts
 
 
-def _find_progress(context: Any, name: str) -> tuple[int, int] | None:
+def _find_progress(
+    context: Any,
+    name: str,
+    *,
+    seen: list[panel.OcrItem] | None = None,
+) -> tuple[int, int] | None:
     """在任务面板上找到同名任务，读它的进度。
 
     name 是去掉进度后缀的去重键，这里按前缀匹配：面板上那一条的进度后缀
     会随执行变化，拿完整文字去对是找不到的。
+
+    seen 不为空时直接用它，省掉一次整屏 OCR。
     """
     key = name[:6]
-    for item in _scan(context):
+    for item in seen if seen is not None else _scan(context):
         if panel.dedupe_key(item.text).startswith(key):
             progress = panel.task_progress(item.text)
             if progress is not None:
