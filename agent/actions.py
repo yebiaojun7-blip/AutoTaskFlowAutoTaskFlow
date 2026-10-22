@@ -13,7 +13,7 @@ import json
 import logging
 import re
 import time
-from typing import Any
+from typing import Any, Callable, NamedTuple, Sequence, Callable, Sequence
 
 from agent import panel
 from agent.custom import app_user_id, load_config, start_app_command
@@ -28,6 +28,47 @@ _FOREGROUND_RE = re.compile(r"topResumedActivity=ActivityRecord\{[^}]*?\s((?:[a-
 DEFAULT_MAX_ROUNDS = 20
 # 主动安全停止的返回标记：让 Pipeline 走 on_error → StopTask。
 STOP_SIGNAL = False
+
+
+class PanelProfile(NamedTuple):
+    """一个任务面板的差异点。
+
+    双11「做任务赚能量」面板和淘金币任务面板的**行结构完全一样**：左边任务名
+    带 (x/y)、下面一行说明、右侧「去完成」，所以挑选任务、点按钮、停留、
+    返回、放弃无进展任务这一整套都能原样复用，只有三件事不一样：
+
+      visible      —— 怎么确认「现在就在这个面板上」
+      home_entry   —— 淘金币首页上打开本面板的入口文字
+      has_overall  —— 面板顶部有没有可信的「完成进度 n/m」
+
+    has_overall 必须严格：能量面板顶部写的是「当前进度 0/50」，那是活动累计
+    计数（从 0 开始、做任务才涨），不是今日完成度。把它当完成度会让刚开局的
+    任务在第一轮就被判为「今日已全部做完」。
+    """
+
+    name: str
+    visible: Callable[[Sequence[panel.OcrItem]], bool]
+    home_entry: tuple[str, ...]
+    has_overall: bool
+    daily_done: bool = True
+
+
+COIN_PROFILE = PanelProfile(
+    "淘金币任务面板",
+    panel.task_panel_visible,
+    panel.COIN_HOME_ENTRY,
+    True,
+)
+
+# 能量面板没有「今日奖励已拿完」这类完成提示页（面板顶部是活动累计进度，
+# 任务做完了也照样列在那里），所以 daily_done 关掉，靠连续空轮收尾。
+ENERGY_PROFILE = PanelProfile(
+    "双11赚能量面板",
+    panel.energy_panel_visible,
+    panel.ENERGY_HOME_ENTRY,
+    False,
+    daily_done=False,
+)
 
 
 def _controller(context: Any) -> Any:
@@ -531,8 +572,9 @@ def _recover_to_panel(
     config: dict[str, Any],
     *,
     tries: int = 6,
+    profile: PanelProfile = COIN_PROFILE,
 ) -> list[panel.OcrItem] | None:
-    """把界面拉回淘金币任务面板，成功时返回面板上的识别结果。
+    """把界面拉回目标任务面板，成功时返回面板上的识别结果。
 
     返回识别结果而不是 bool，是为了让调用方省掉一次整屏 OCR：每轮本来就要
     判任务进度，重新截一张图再跑一遍全屏 OCR 是纯浪费（真机上一次要好几秒）。
@@ -541,7 +583,7 @@ def _recover_to_panel(
       1. 已在任务面板 —— 直接返回；
       2. 停在双11 组队活动页 —— 这是广告页，没有任何日常任务，按返回退出；
       3. 停在淘金币赛车首页 —— 这里按返回会直接退出淘金币，
-         必须点左下角的「赚金币」才能重新打开任务面板；
+         必须点剖面下的「赚金币」/「去赚能量」才能重新打开目标面板；
       4. 停在淘宝首页 —— 点「领淘金币」图标进入；
       5. 停在促销浮层（如「双11提前领好券」）—— 封面挡住了入口，按返回关掉；
       6. 挡住「想要打开其他应用」确认框 —— 直接点「打开」继续这次跳转；
@@ -550,9 +592,11 @@ def _recover_to_panel(
     首页单独处理：那排图标（「领淘金币」）会随信息流一起滚出屏幕，启动动画期间
     也可能还没渲染出来。这两种情况下按返回都会直接退出淘宝，于是越退越找不到入口，
     所以只能往下滑找入口，实在不行重启淘宝，唯独不能按返回。
+
+    profile 决定目标面板：能量任务走到赛车首页时要点「去赚能量」而不是「赚金币」。
     """
     if _ensure_taobao_foreground(context, config):
-        LOGGER.info("已重新打开淘宝，继续找任务面板")
+        LOGGER.info("已重新打开淘宝，继续找%s", profile.name)
 
     home_tries = 0
     for _ in range(tries):
@@ -565,11 +609,19 @@ def _recover_to_panel(
             _back(context)
             continue
 
-        if panel.task_panel_visible(items):
+        if profile.visible(items):
             return items
-        if panel.daily_done_visible(items):
+        if profile.daily_done and panel.daily_done_visible(items):
             LOGGER.info("今日任务已全部完成，无需回到任务面板")
             return items
+
+        # 已进了淘金币任务面板但目标是能量面板：这个面板上没有「去赚能量」，
+        # 而它里面又有「淘金币趣味课堂」这类含「淘金币」的文字，继续往下走会
+        # 把任务行当成首页入口点下去。按返回回到淘金币首页再重找入口。
+        if panel.task_panel_visible(items):
+            LOGGER.info("当前在淘金币任务面板而非%s，按返回回到淘金币首页", profile.name)
+            _back(context)
+            continue
 
         if panel.team_page_visible(items):
             LOGGER.info("误入组队活动页，返回退出（该页面没有日常任务）")
@@ -588,9 +640,9 @@ def _recover_to_panel(
             continue
 
         if panel.coin_home_visible(items):
-            entry = panel.find_text_by_keywords(items, panel.COIN_HOME_ENTRY)
+            entry = panel.find_text_by_keywords(items, profile.home_entry)
             if entry is not None:
-                LOGGER.info("在淘金币首页，点击「%s」打开任务面板", entry.text)
+                LOGGER.info("在淘金币首页，点击「%s」打开%s", entry.text, profile.name)
                 _click_item(context, entry, delay=2.0)
                 continue
 
@@ -629,7 +681,7 @@ def _recover_to_panel(
         _back(context)
 
     items = _scan(context)
-    return items if panel.task_panel_visible(items) else None
+    return items if profile.visible(items) else None
 
 
 def open_coin_page(context: Any, config: dict[str, Any]) -> bool:
@@ -650,6 +702,20 @@ def open_coin_page(context: Any, config: dict[str, Any]) -> bool:
     return True
 
 
+def open_energy_page(context: Any, config: dict[str, Any]) -> bool:
+    """从任意起始页面进入双11「做任务赚能量」面板，供 Pipeline 入口节点调用。
+
+    入口就在淘金币首页上，与「去赚金币」并排，所以复用同一套恢复逻辑，
+    只把目标面板和首页入口文字换成能量那边的。
+    """
+    items = _recover_to_panel(context, config, profile=ENERGY_PROFILE)
+    if items is None:
+        LOGGER.error("无法进入双11赚能量面板")
+        return False
+    LOGGER.info("已进入双11赚能量面板")
+    return True
+
+
 def report_daily_done() -> bool:
     """在「今日奖励已拿完」这一屏上收尾，不再进日常循环。
 
@@ -662,6 +728,30 @@ def report_daily_done() -> bool:
 
 
 def run_daily_loop(context: Any, config: dict[str, Any], *, max_rounds: int = DEFAULT_MAX_ROUNDS) -> bool:
+    """淘金币任务面板的主循环。返回值语义同 _run_panel_loop。"""
+    return _run_panel_loop(context, config, profile=COIN_PROFILE, max_rounds=max_rounds)
+
+
+def run_energy_loop(context: Any, config: dict[str, Any], *, max_rounds: int = DEFAULT_MAX_ROUNDS) -> bool:
+    """双11「做任务赚能量」面板的主循环。
+
+    和淘金币面板共用同一套流程，差别只在两处：
+      - 目标面板不同（顶部是「做任务赚能量 / 当前进度」而不是「赚金币抵钱」）；
+      - 没有可信的「完成进度 n/m」，只能靠「连续几轮都没任务可做」判定收尾。
+
+    那个面板上做不了的任务（拉人助力、天猫积分兑换、快手打卡、微信）靠
+    config/tasks.json 的黑名单挡掉，不靠完成度判断。
+    """
+    return _run_panel_loop(context, config, profile=ENERGY_PROFILE, max_rounds=max_rounds)
+
+
+def _run_panel_loop(
+    context: Any,
+    config: dict[str, Any],
+    *,
+    profile: PanelProfile,
+    max_rounds: int = DEFAULT_MAX_ROUNDS,
+) -> bool:
     """主循环：扫描 → 安全词检测 → 挑一个任务 → 执行 → 回来 → 重复。
 
     返回值语义：
@@ -699,14 +789,14 @@ def run_daily_loop(context: Any, config: dict[str, Any], *, max_rounds: int = DE
             return STOP_SIGNAL
 
         # 任务全部做完时淘宝会弹"今日奖励已拿完"，这是正常结束而非异常。
-        if panel.daily_done_visible(items):
+        if profile.daily_done and panel.daily_done_visible(items):
             LOGGER.info("检测到「今日奖励已拿完」提示，今日任务已完成，正常结束")
             return True
 
-        if not panel.task_panel_visible(items):
-            LOGGER.info("第 %d 轮：不在任务面板，尝试回到面板", round_index)
-            if _recover_to_panel(context, config) is None:
-                LOGGER.error("无法回到淘金币任务面板，停止任务")
+        if not profile.visible(items):
+            LOGGER.info("第 %d 轮：不在%s，尝试恢复", round_index, profile.name)
+            if _recover_to_panel(context, config, profile=profile) is None:
+                LOGGER.error("无法回到%s，停止任务", profile.name)
                 return STOP_SIGNAL
             # 成功找回面板不算空轮次：否则 max_empty_rounds=1 时
             # 刚恢复就被判定为"今日任务已完成"，直接结束整轮任务。
@@ -714,7 +804,9 @@ def run_daily_loop(context: Any, config: dict[str, Any], *, max_rounds: int = DE
 
         # 面板本身能判断"做完了"时不必再扫：主账号没有进度行，走 pick_task 兜底；
         # 分身账号有「完成进度 n/m」，n>=m 即完成。
-        if completed and panel.overall_done(items):
+        # 能量面板没有这种可信进度行（「当前进度 n/50」是活动累计计数），
+        # 对它强行套用会让开局第一轮就判成「今日已全部做完」，所以按 profile 关掉。
+        if completed and profile.has_overall and panel.overall_done(items):
             progress = panel.overall_progress(items)
             if progress is not None:
                 LOGGER.info("完成进度 %d/%d，今日任务已全部完成", *progress)
@@ -770,9 +862,9 @@ def run_daily_loop(context: Any, config: dict[str, Any], *, max_rounds: int = DE
             LOGGER.warning("任务「%s」未能真正执行，不计入完成", pick.item.text)
         empty_rounds = 0
 
-        recovered = _recover_to_panel(context, config)
+        recovered = _recover_to_panel(context, config, profile=profile)
         if recovered is None:
-            LOGGER.warning("任务后未能回到任务面板")
+            LOGGER.warning("任务后未能回到%s", profile.name)
 
         tried[name] = tried.get(name, 0) + 1
         # 面板就在眼前时，用这一轮的识别结果判进度，不再单独截一张图：
@@ -964,6 +1056,39 @@ def register(agent_server: Any) -> None:
 
             LOGGER.info("===== 开始淘金币日常任务（最多 %d 轮）=====", max_rounds)
             return run_daily_loop(context, config, max_rounds=max_rounds)
+
+
+    @agent_server.custom_action("taobao_open_energy_page")
+    class TaobaoOpenEnergyPage(CustomAction):
+        """从当前页面进入双11「做任务赚能量」面板。"""
+
+        def run(self, context: Context, argv: Any) -> bool:
+            try:
+                config = load_config()
+            except Exception as exc:  # noqa: BLE001 - 配置读不出来必须显式失败
+                LOGGER.error("读取任务配置失败：%s", exc)
+                return False
+            return open_energy_page(context, config)
+
+    @agent_server.custom_action("taobao_energy_loop")
+    class TaobaoEnergyLoop(CustomAction):
+        """跑完一整轮双11「做任务赚能量」。custom_action_param 支持 max_rounds 覆盖。"""
+
+        def run(self, context: Context, argv: Any) -> bool:
+            try:
+                max_rounds = int(_parse_params(argv).get("max_rounds", DEFAULT_MAX_ROUNDS))
+            except (TypeError, ValueError):
+                LOGGER.warning("max_rounds 不是整数，改用默认值 %d", DEFAULT_MAX_ROUNDS)
+                max_rounds = DEFAULT_MAX_ROUNDS
+
+            try:
+                config = load_config()
+            except Exception as exc:  # noqa: BLE001 - 配置读不出来必须显式失败
+                LOGGER.error("读取任务配置失败：%s", exc)
+                return False
+
+            LOGGER.info("===== 开始双11赚能量任务（最多 %d 轮）=====", max_rounds)
+            return run_energy_loop(context, config, max_rounds=max_rounds)
 
 
 def register_all(agent_server: Any) -> None:

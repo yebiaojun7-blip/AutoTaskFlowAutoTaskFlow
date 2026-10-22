@@ -31,6 +31,16 @@
             "option": [
                 "运行账号"
             ]
+        },
+        {
+            "name": "TaobaoEnergyDaily",
+            "label": "双11赚能量",
+            "description": "进双11「做任务赚能量」面板，做浏览 / 搜索 / 答题任务；拉人、兑换、站外打卡类任务直接跳过。",
+            "entry": "OpenEnergyApp",
+            "default_check": false,
+            "option": [
+                "运行账号"
+            ]
         }
     ],
     "option": {
@@ -48,6 +58,11 @@
                             "custom_action_param": {
                                 "user_id": 0
                             }
+                        },
+                        "OpenEnergyApp": {
+                            "custom_action_param": {
+                                "user_id": 0
+                            }
                         }
                     }
                 },
@@ -56,6 +71,11 @@
                     "label": "应用分身（Android 用户 999）",
                     "pipeline_override": {
                         "OpenTaobao": {
+                            "custom_action_param": {
+                                "user_id": 999
+                            }
+                        },
+                        "OpenEnergyApp": {
                             "custom_action_param": {
                                 "user_id": 999
                             }

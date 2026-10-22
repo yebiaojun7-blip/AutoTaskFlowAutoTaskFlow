@@ -159,8 +159,12 @@ def dedupe_key(text: str) -> str:
 #     说明文字    「浏览15秒」
 # 说明文字本身不是任务，但它可能命中名单词（「点击去逛」就在 jump_tasks 里），
 # 一旦被当成任务挑走，就会去点它的中心坐标——那里是纯文本，点下去毫无反应。
+# 双11「做任务赚能量」面板上，同一条说明文字后面还会紧跟奖励数字：
+#     「点击去逛+400」「浏览15秒+400」「浏览5秒+400」
+# 不带这段尾缀的写法只在淘金币面板上成立，不放开就会把它们当成任务名，
+# 「点击去逛+400」还命中 jump_tasks 名单，于是被挑走、点在纯文本上白耗一轮。
 _SUBTITLE_RE = re.compile(
-    r"^(?:浏览\d+秒|参与答题|点击去逛|每日来.{0,8}|去完成|立即完成|已领取|已完成)$"
+    r"^(?:浏览\d+秒|参与答题|点击去逛|每日来.{0,8}|去完成|立即完成|已领取|已完成)(?:\+\d+)?$"
 )
 
 
@@ -179,6 +183,7 @@ _SUBTITLE_DX = 40
 
 def subtitle_for(items: Sequence[OcrItem], target: OcrItem) -> OcrItem | None:
     """取任务名正下方那行说明文字（「点击去逛」「参与答题」「浏览15秒」）。
+
 
     这两个字本身不能点，但它是**唯一能判断任务类型的地方**：面板上有的任务名
     完全自造词（「去神奇海洋逛逛吧」「领闪购红包下单直接省」），不在任何名单里，
@@ -199,6 +204,41 @@ def subtitle_for(items: Sequence[OcrItem], target: OcrItem) -> OcrItem | None:
             best = item
             best_dy = dy
     return best
+
+
+def repeats_task_above(items: Sequence[OcrItem], target: OcrItem) -> bool:
+    """这行是否是正上方那个任务名的复述。
+
+    双11「做任务赚能量」面板把说明文字写成「任务名 + 奖励」，于是同一行任务
+    会出现两条文字：
+
+        逛一逛蚂蚁庄园(0/1)
+        逛一逛蚂蚁庄园+800
+
+    第二行既没有进度标记，又能通过「右侧有按钮」的检查（它和任务名共用同一个
+    「去完成」），还命中 jump_tasks 名单，于是会被当成一个独立任务挑走 ——
+    点下去和上面那个任务同一处，白耗一轮。判据是「文字包含上方任务名去掉进度
+    后的全部字样」。
+
+    不能只看「结尾带 +N」：能量面板上「去答题最高得+1000」本身就是一个任务，
+    它同样没有进度、同样以奖励数字结尾，只能靠上面的任务名是否被复述来区分。
+    """
+    if task_progress(target.text) is not None:
+        return False
+    text = task_key(target.text)
+    for item in items:
+        if item is target or task_progress(item.text) is None:
+            continue
+        name = dedupe_key(item.text)
+        if not name or name not in text:
+            continue
+        dy = target.y - item.y
+        if dy <= 0 or dy > _SUBTITLE_DY:
+            continue
+        if abs(item.x - target.x) > _SUBTITLE_DX:
+            continue
+        return True
+    return False
 
 
 def task_finished(text: str) -> bool:
@@ -493,6 +533,35 @@ COIN_HOME_MARKERS = (
 # 淘金币首页上打开任务面板的入口文字。
 COIN_HOME_ENTRY = ("赚金币",)
 
+# 双11「做任务赚能量」面板的特征词。
+#
+# 这个面板和淘金币面板的**行结构完全一样**：左边任务名带 (x/y)、下面一行
+# 说明、右侧「去完成」/「去兑换」，所以任务挑选逻辑可以原样复用；差别只在顶部：
+#  淘金币面板 —— 「赚金币抵钱」「完成进度 n/m」
+#  能量面板   —— 「做任务赚能量」「任务奖励 …得车饰」「当前进度 n/50」
+#
+# 「当前进度 0/50」是活动累计计数，**不是今日完成度**：它从 0 起、做任务才涨，
+# 绝不能当「今日已做完」的判据（overall_done 只认「完成进度」，这里刻意用
+# 「当前进度」就是为了不被它误命中）。
+ENERGY_PANEL_MARKERS = (
+    "做任务赚能量",
+    "当前进度",
+    "任务奖励",
+    # 面板可以整屏下滑，头部那三行会滚出屏幕，只剩固定的标题和任务行。
+    # 下面这些是只在能量面板出现的任务名，用来覆盖下滑后的状态。
+    "每拉1人最高得",
+    "天猫积分兑换能量",
+    "去玩趣味小游戏",
+    "去快手打卡领手机",
+    "逛一逛支付宝金豆夺宝",
+)
+
+# 单个特征词不足以说明是能量面板（「任务奖励」在别的活动页也可能出现）。
+ENERGY_PANEL_MIN_HITS = 2
+
+# 淘金币首页上打开能量面板的入口，与「去赚金币」并排。
+ENERGY_HOME_ENTRY = ("去赚能量", "赚能量")
+
 # 淘宝首页上通往淘金币的入口文字。真机实测首页那一排图标会被 OCR 合并成一条，
 # 例如「领淘金币充值中心试用领取常买超市」，所以只能按字符占比推算点击位置。
 COIN_ENTRY_KEYWORDS = ("淘金币", "领金币", "我的淘金币")
@@ -569,7 +638,14 @@ def task_panel_visible(items: Iterable[OcrItem]) -> bool:
     和 panel_visible 的区别：至少要命中 PANEL_MIN_HITS 个面板专属特征词。
     首页、促销浮层、搜索结果页都可能零星出现「立即领取」，用单标记判定会把它们
     当成面板，进而把页面上的「搜索」框误认成搜索任务。
+
+    能量面板也要先排除：它和淘金币面板共用「搜一搜你心仪的宝贝」「拍立淘逛
+    感兴趣的宝贝」两个任务名，真机上能量面板能命中 PANEL_MARKERS 两条，
+    于是被当成了淘金币面板。
     """
+    items = list(items)
+    if energy_panel_visible(items):
+        return False
     return panel_visible(items, PANEL_MARKERS, min_hits=PANEL_MIN_HITS)
 
 
@@ -578,8 +654,21 @@ def team_page_visible(items: Iterable[OcrItem]) -> bool:
     return panel_visible(items, TEAM_PAGE_MARKERS)
 
 
+def energy_panel_visible(items: Iterable[OcrItem]) -> bool:
+    """当前屏是否是双11「做任务赚能量」面板。"""
+    return panel_visible(items, ENERGY_PANEL_MARKERS, min_hits=ENERGY_PANEL_MIN_HITS)
+
+
 def coin_home_visible(items: Iterable[OcrItem]) -> bool:
-    """当前屏是否是淘金币赛车首页（可以点「赚金币」进入任务面板）。"""
+    """当前屏是否是淘金币赛车首页（可以点「赚金币」进入任务面板）。
+
+    能量面板的标题「做任务赚能量」里也含「赚能量」，会被 COIN_HOME_MARKERS
+    错认成首页，于是「点赚金币开面板」的动作打在面板标题上，页面纹丝不动。
+    所以先排除能量面板。
+    """
+    items = list(items)
+    if energy_panel_visible(items):
+        return False
     return panel_visible(items, COIN_HOME_MARKERS)
 
 
@@ -744,6 +833,10 @@ def pick_task(
         # 它就在任务名正下方，且「点击去逛」本身还命中 jump_tasks 名单，
         # 不排除就会被当成任务挑走，点它只是点在纯文本上。
         if is_subtitle(item.text):
+            continue
+        # 说明文字也可能写成「任务名 + 奖励」（「逛一逛蚂蚁庄园+800」），
+        # 它带不了进度、却和上面的任务共用同一个「去完成」，会被当成另一个任务。
+        if repeats_task_above(items, item):
             continue
         text = dedupe_key(item.text)
         if text in exclude:

@@ -1035,7 +1035,7 @@ class OpenAppDialogTest(unittest.TestCase):
         jump_row = [
             text_item("赚金币抵钱", 100, 150, 300, 48),
             text_item("今日累计奖励", 100, 220, 240, 40),
-            text_item("点击去逛+20", 100, 300),
+            text_item("去蚂蚁庄园逛逛哟(0/1)", 100, 300),
             text_item("去逛逛", 900, 300, 120, 40),
         ]
         context = FakeContext(
@@ -1069,7 +1069,7 @@ class OpenAppDialogTest(unittest.TestCase):
         jump_row = [
             text_item("赚金币抵钱", 100, 150, 300, 48),
             text_item("今日累计奖励", 100, 220, 240, 40),
-            text_item("点击去逛+40", 100, 300),
+            text_item("去蚂蚁庄园逛逛哟(0/1)", 100, 300),
             text_item("去逛逛", 900, 300, 120, 40),
         ]
         context = FakeContext(
@@ -1791,6 +1791,265 @@ class QuizTaskTest(unittest.TestCase):
         self.assertTrue(any("未能真正执行" in line for line in logs.output))
         # 没找到选项就不能瞎点：提交按钮一次都不该被按。
         self.assertNotIn((360, 1482), context.controller.clicks)
+
+
+# 双11「做任务赚能量」面板真机整屏 OCR（一加 Ace 3 / 淘宝 2026-10-22），坐标抄自 probe 日志。
+# 行结构和淘金币面板一样（左任务名 + 右侧「去完成」），差别只在顶部：
+#   「任务奖励 …50次任务得车饰」是对照表，与活动累计计数「当前进度 0/50」毫不相干。
+# 说明文字后面还跟着奖励数字（「浏览15秒+400」），淘金币面板上没有这种写法。
+ENERGY_PANEL = [
+    text_item("做任务赚能量", 244, 315, 231, 39),
+    text_item("任务奖励", 35, 397, 156, 30),
+    text_item("50次任务得车饰", 509, 407, 167, 28),
+    text_item("当前进度", 30, 432, 101, 38),
+    text_item("0/50", 32, 463, 62, 32),
+    text_item("逛一逛蚂蚁庄园(0/1)", 130, 547, 268, 38),
+    text_item("去完成", 583, 569, 90, 36),
+    text_item("逛一逛蚂蚁庄园+800", 131, 594, 261, 23),
+    text_item("好物随心选(0/10)", 131, 683, 230, 33),
+    text_item("去完成", 583, 699, 88, 36),
+    text_item("浏览15秒+400", 131, 722, 196, 28),
+    text_item("逛一逛支付宝农场(0/1)", 131, 813, 298, 33),
+    text_item("去完成", 581, 829, 89, 37),
+    text_item("点击去逛+600", 131, 854, 190, 23),
+    text_item("好物沉浸看(0/10)", 131, 943, 230, 35),
+    text_item("去完成", 583, 961, 88, 35),
+    text_item("浏览15秒+400", 131, 983, 196, 28),
+    text_item("淘金币省钱等级测试(0/1)", 131, 1075, 325, 33),
+    text_item("去完成", 583, 1092, 88, 36),
+    text_item("去答题最高得+1000", 133, 1115, 247, 28),
+    text_item("逛一逛支付宝金豆夺宝(0/1)", 131, 1206, 354, 33),
+    text_item("去完成", 581, 1221, 89, 36),
+    text_item("点击去逛+400", 128, 1244, 195, 28),
+    text_item("搜一搜你心仪的宝贝(0/5)", 131, 1336, 330, 33),
+    text_item("去完成", 581, 1351, 90, 41),
+    text_item("浏览15秒+400", 131, 1377, 195, 28),
+    text_item("拍立淘逛感兴趣的宝贝(0/5)", 131, 1468, 359, 33),
+    text_item("去完成", 581, 1481, 90, 41),
+    text_item("浏览5秒+400", 131, 1508, 185, 28),
+]
+
+# 同一面板下滑后的样子：顶部那三行（任务奖励 / 当前进度 / 0/50）已经滚出屏幕，
+# 只剩固定的标题和任务行，后面跟着做不了的几类任务（拉人、天猫积分、小游戏、快手）。
+ENERGY_PANEL_SCROLLED = [
+    text_item("做任务赚能量", 242, 313, 233, 45),
+    text_item("去答题最高得+1000", 135, 397, 244, 23),
+    text_item("去完成", 581, 377, 92, 32),
+    text_item("逛一逛支付宝金豆夺宝(0/1)", 130, 485, 353, 33),
+    text_item("去完成", 583, 501, 88, 36),
+    text_item("点击去逛+400", 128, 524, 195, 28),
+    text_item("搜一搜你心仪的宝贝(0/5)", 130, 615, 329, 33),
+    text_item("去完成", 583, 633, 90, 36),
+    text_item("浏览15秒+400", 130, 656, 194, 28),
+    text_item("拍立淘逛感兴趣的宝贝(0/5)", 130, 745, 360, 37),
+    text_item("去完成", 583, 763, 90, 37),
+    text_item("浏览5秒+400", 131, 788, 185, 28),
+    text_item("每拉1人最高得2000能量(0/10)", 131, 876, 378, 36),
+    text_item("去完成", 583, 895, 90, 37),
+    text_item("邀请好友成功助力最高得+2000", 133, 919, 368, 28),
+    text_item("天猫积分兑换能量(0/3)", 131, 1009, 274, 33),
+    text_item("去兑换", 581, 1024, 89, 36),
+    text_item("每100天猫积分兑换+1500", 135, 1052, 311, 23),
+    text_item("去玩趣味小游戏(0/3)", 131, 1138, 274, 38),
+    text_item("去完成", 581, 1155, 90, 41),
+    text_item("一款游戏得+600", 131, 1181, 227, 28),
+    text_item("去快手打卡领手机(0/1)", 133, 1272, 294, 33),
+    text_item("去完成", 580, 1285, 91, 41),
+    text_item("点击去逛+800", 128, 1311, 195, 28),
+]
+
+# 面板上能做的任务都做完了：任务名进度做满、右侧换成「已领取」。
+# 能量面板没有「今日奖励已拿完」那种完成提示页，只能靠这个形态自然收尾。
+ENERGY_SETTLED = [
+    text_item("做任务赚能量", 244, 315, 231, 39),
+    text_item("当前进度", 30, 432, 101, 38),
+    text_item("0/50", 32, 463, 62, 32),
+    text_item("逛一逛蚂蚁庄园(1/1)", 130, 547, 268, 38),
+    text_item("已领取", 583, 569, 90, 36),
+]
+
+
+class EnergyPanelTest(unittest.TestCase):
+    """双11「做任务赚能量」面板：识别、互斥、跳过做不了的任务。"""
+
+    def setUp(self) -> None:
+        self.config = load_config()
+
+    def test_panel_is_recognised(self) -> None:
+        self.assertTrue(panel.energy_panel_visible(panel.parse_ocr_items(ENERGY_PANEL)))
+
+    def test_scrolled_panel_is_still_recognised(self) -> None:
+        """面板可以整屏下滑，头部三行会滚出屏幕，特征词不能全押在头部。"""
+        items = panel.parse_ocr_items(ENERGY_PANEL_SCROLLED)
+        self.assertTrue(panel.energy_panel_visible(items))
+
+    def test_energy_panel_is_not_the_coin_panel(self) -> None:
+        """两个面板共用「搜一搜你心仪的宝贝」「拍立淘逛感兴趣的宝贝」两条任务名。"""
+        items = panel.parse_ocr_items(ENERGY_PANEL)
+        self.assertFalse(panel.task_panel_visible(items))
+        self.assertFalse(panel.coin_home_visible(items))
+
+    def test_coin_panel_is_not_the_energy_panel(self) -> None:
+        coin = panel.parse_ocr_items(DEVICE_PANEL)
+        self.assertFalse(panel.energy_panel_visible(coin))
+        self.assertTrue(panel.task_panel_visible(coin))
+
+    def test_activity_counter_is_not_today_progress(self) -> None:
+        """「当前进度 0/50」是活动累计计数，做满了也不等于今天做完。"""
+        items = panel.parse_ocr_items(ENERGY_PANEL)
+        self.assertIsNone(panel.overall_progress(items))
+        self.assertFalse(panel.overall_done(items))
+
+        full = panel.parse_ocr_items(
+            [
+                text_item("做任务赚能量", 244, 315, 231, 39),
+                text_item("当前进度", 30, 432, 101, 38),
+                text_item("50/50", 32, 463, 62, 32),
+            ]
+        )
+        self.assertFalse(panel.overall_done(full))
+
+    def test_reward_suffixed_subtitle_is_not_a_task(self) -> None:
+        """说明文字后面跟着奖励数字（「浏览15秒+400」），不能当成任务名挑走。"""
+        for text in ("点击去逛+400", "浏览15秒+400", "浏览5秒+400"):
+            with self.subTest(text=text):
+                self.assertTrue(panel.is_subtitle(text), text)
+
+    def test_restated_task_name_is_not_a_second_task(self) -> None:
+        """能量面板把说明写成「任务名 + 奖励」，它和上面的任务共用同一个按钮。
+
+        这行没有进度、右侧又有「去完成」，还命中 jump_tasks 名单，
+        不排除就会被当成另一个任务挑走，点下去和上面那个点在同一处。
+        """
+        items = panel.parse_ocr_items(ENERGY_PANEL)
+        restated = panel.find_text_by_keywords(items, ("逛一逛蚂蚁庄园+800",))
+        assert restated is not None
+        self.assertTrue(panel.repeats_task_above(items, restated))
+
+        # 「去答题最高得+1000」本身就是一个任务，不能被当成谁的复述。
+        real = panel.find_text_by_keywords(items, ("去答题最高得+1000",))
+        assert real is not None
+        self.assertFalse(panel.repeats_task_above(items, real))
+
+    def test_undoable_task_families_are_blacklisted(self) -> None:
+        """拉人、天猫积分兑换、快手打卡都要人跳出去做，本机做不了。"""
+        for name in (
+            "每拉1人最高得2000能量(0/10)",
+            "天猫积分兑换能量(0/3)",
+            "去快手打卡领手机(0/1)",
+        ):
+            with self.subTest(name=name):
+                decision = panel.classify_task(name, self.config)
+                self.assertEqual(decision.kind, "skip")
+                self.assertEqual(decision.reason, "命中黑名单")
+
+    def test_pick_skips_undoable_rows_and_takes_a_real_task(self) -> None:
+        """下拉后的面板上只有「逛一逛金豆夺宝」和三类做不了的任务。"""
+        items = panel.parse_ocr_items(ENERGY_PANEL_SCROLLED)
+        pick = panel.pick_task(items, self.config)
+
+        self.assertIsNotNone(pick.item)
+        assert pick.item is not None
+        self.assertEqual(pick.item.text, "逛一逛支付宝金豆夺宝(0/1)")
+        for blocked in ("每拉1人", "天猫积分", "快手"):
+            self.assertNotIn(blocked, pick.item.text)
+
+    def test_only_undoable_rows_means_no_task(self) -> None:
+        """整屏只剩做不了的任务时必须挑不出来，而不是硬点一个。"""
+        items = panel.parse_ocr_items(
+            [
+                text_item("做任务赚能量", 244, 315, 231, 39),
+                text_item("当前进度", 30, 432, 101, 38),
+                text_item("每拉1人最高得2000能量(0/10)", 131, 876, 378, 36),
+                text_item("去完成", 583, 895, 90, 37),
+                text_item("天猫积分兑换能量(0/3)", 131, 1009, 274, 33),
+                text_item("去兑换", 581, 1024, 89, 36),
+                text_item("去快手打卡领手机(0/1)", 133, 1272, 294, 33),
+                text_item("去完成", 580, 1285, 91, 41),
+            ]
+        )
+        pick = panel.pick_task(items, self.config)
+
+        self.assertIsNone(pick.item)
+        self.assertTrue(any("命中黑名单" in entry for entry in pick.skipped))
+
+    def test_energy_profile_turns_off_daily_done_and_overall(self) -> None:
+        """这两个信号在能量面板上都不成立，开着会提前结束整轮任务。"""
+        self.assertFalse(actions.ENERGY_PROFILE.daily_done)
+        self.assertFalse(actions.ENERGY_PROFILE.has_overall)
+        self.assertTrue(actions.COIN_PROFILE.daily_done)
+        self.assertTrue(actions.COIN_PROFILE.has_overall)
+        self.assertEqual(actions.ENERGY_PROFILE.home_entry, panel.ENERGY_HOME_ENTRY)
+
+
+class EnergyRecoverTest(unittest.TestCase):
+    """进入能量面板的路径与淘金币面板共用，只有目标页和入口文字不同。"""
+
+    def test_coin_home_clicks_earn_energy(self) -> None:
+        """在赛车首页上要按「赚能量」而不是「赚金币」进面板。"""
+        context = FakeContext([COIN_HOME, ENERGY_PANEL])
+
+        self.assertTrue(actions.open_energy_page(context, fast_config()))
+
+        # 「赚能量」文字块 (613,650,84,36) 的中心。
+        self.assertEqual(context.controller.clicks, [(655, 668)])
+
+    def test_coin_task_panel_is_left_by_back(self) -> None:
+        """已经进了淘金币任务面板时，它没有「去赚能量」入口，只能按返回回首页。"""
+        context = FakeContext([DEVICE_PANEL, COIN_HOME, ENERGY_PANEL])
+
+        self.assertTrue(actions.open_energy_page(context, fast_config()))
+
+        self.assertIn(4, context.controller.keys)
+        self.assertEqual(context.controller.clicks, [(655, 668)])
+
+    def test_unreachable_panel_fails_instead_of_hanging(self) -> None:
+        blank = [text_item("加载中", 300, 600, 120, 30)]
+        context = FakeContext([blank])
+
+        with self.assertLogs("autotaskflow", level="ERROR") as logs:
+            self.assertFalse(actions.open_energy_page(context, fast_config()))
+
+        self.assertTrue(any("无法进入双11赚能量面板" in line for line in logs.output))
+
+
+class EnergyLoopTest(unittest.TestCase):
+    """能量面板主循环：做任务、跳过做不了的、自己收尾退出。"""
+
+    def test_loop_runs_one_task_and_stops_by_itself(self) -> None:
+        screens = [ENERGY_PANEL, ENERGY_PANEL, ENERGY_SETTLED, ENERGY_SETTLED]
+        context = FakeContext(screens)
+
+        result = actions.run_energy_loop(context, fast_config(), max_rounds=5)
+
+        self.assertTrue(result)
+        # 「逛一逛蚂蚁庄园(0/1)」右侧「去完成」(583,569,90,36) 的中心。
+        self.assertIn((628, 587), context.controller.clicks)
+        # 做完按返回回面板。
+        self.assertIn(4, context.controller.keys)
+
+    def test_loop_never_clicks_undoable_rows(self) -> None:
+        screens = [ENERGY_PANEL_SCROLLED] + [ENERGY_SETTLED] * 4
+        context = FakeContext(screens)
+
+        actions.run_energy_loop(context, fast_config(), max_rounds=2)
+
+        for x, y in context.controller.clicks:
+            self.assertNotIn((x, y), [(628, 913), (625, 1042), (625, 1305)], f"点了做不了的任务 {(x, y)}")
+
+    def test_registered_actions_exist(self) -> None:
+        open_cls = _registered_action("taobao_open_energy_page")
+        loop_cls = _registered_action("taobao_energy_loop")
+        self.assertTrue(open_cls and loop_cls)
+
+    def test_registered_loop_honours_max_rounds(self) -> None:
+        """配置项经 custom_action_param 传进来的 max_rounds 必须生效。"""
+        context = FakeContext([ENERGY_PANEL])
+        argv = SimpleNamespace(custom_action_param={"max_rounds": 1})
+
+        loop_cls = _registered_action("taobao_energy_loop")
+        self.assertTrue(loop_cls().run(context, argv))
+        self.assertEqual(context.controller.clicks, [(628, 587)])
 
 
 if __name__ == "__main__":
