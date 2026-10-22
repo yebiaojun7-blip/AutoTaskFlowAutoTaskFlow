@@ -633,12 +633,21 @@ def _recover_to_panel(
 
 
 def open_coin_page(context: Any, config: dict[str, Any]) -> bool:
-    """从任意起始页面进入淘金币任务面板，供 Pipeline 入口节点调用。"""
-    if _recover_to_panel(context, config):
+    """从任意起始页面进入淘金币任务面板，供 Pipeline 入口节点调用。
+
+    「今日奖励已拿完」这一屏也算就位：任务面板换成了完成提示，本来就没有面板可进。
+    它和「没进去」都是返回 True，区别只在对不对得上后续节点 —— 入口 Pipeline 的
+    WaitCoinPanel 同时认完成提示，因此这里照实记录是哪种情况即可，不能当成失败。
+    """
+    items = _recover_to_panel(context, config)
+    if items is None:
+        LOGGER.error("无法进入淘金币任务面板")
+        return False
+    if panel.daily_done_visible(items):
+        LOGGER.info("今日任务已完成，不需要再进任务面板")
+    else:
         LOGGER.info("已进入淘金币任务面板")
-        return True
-    LOGGER.error("无法进入淘金币任务面板")
-    return False
+    return True
 
 
 

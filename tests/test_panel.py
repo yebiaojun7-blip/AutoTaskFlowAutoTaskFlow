@@ -1105,6 +1105,22 @@ class DailyDoneTest(unittest.TestCase):
         self.assertEqual(context.controller.clicks, [])
         self.assertEqual(context.controller.keys, [])
 
+    def test_entry_node_accepts_the_daily_done_screen(self) -> None:
+        """开局就停在「今日奖励已拿完」时，入口节点不能报「进不去任务面板」。
+
+        这一屏没有任务面板可进，任务其实已经全部做完了；判成失败会让整轮运行
+        变红，而用户什么都没做错。
+        """
+        context = FakeContext([DAILY_DONE_PAGE])
+        with self.assertLogs("autotaskflow", level="INFO") as logs:
+            result = actions.open_coin_page(context, fast_config())
+
+        self.assertTrue(result)
+        self.assertEqual(context.controller.clicks, [])
+        joined = "\n".join(logs.output)
+        self.assertNotIn("无法进入淘金币任务面板", joined)
+        self.assertIn("今日任务已完成", joined)
+
 
 class HomeMisjudgeTest(unittest.TestCase):
     """淘宝首页上有「立即领取」和「搜索」，不能因此被当成任务面板。"""
