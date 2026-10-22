@@ -63,6 +63,8 @@ class FakeController:
         self.inputs: list[str] = []
         self.shells: list[str] = []
         self.started: list[str] = []
+        # 默认输入成功；置 False 用来复现 adb input text 拒绝非 ASCII 的情况。
+        self.input_ok = True
         # 手机上用 MaaFwApp 时控制器是 Android 原生控制器：没有 shell，
         # 只能靠框架的 StartApp 拉起应用。
         self.shell_supported = True
@@ -93,7 +95,7 @@ class FakeController:
 
     def post_input_text(self, text) -> FakeJob:  # noqa: ANN001
         self.inputs.append(str(text))
-        return FakeJob()
+        return FakeJob(ok=self.input_ok)
 
     def post_start_app(self, package) -> FakeJob:  # noqa: ANN001
         self.started.append(str(package))
@@ -558,6 +560,29 @@ class SearchTaskTest(unittest.TestCase):
 
         self.assertEqual(context.controller.inputs, [])
         # 没搜过就必须退出来，不能停在加载页上。
+        self.assertIn(4, context.controller.keys)
+
+    def test_input_failure_is_not_counted_as_done(self) -> None:
+        """关键词没输进去时不能算完成，更不能按回车提交空搜索。
+
+        adb 的 input text 只认 ASCII，中文关键词会让它直接失败。之前不检查
+        作业成败，输入失败也照旧按回车，等于搜了个空：任务进度一分不涨，
+        而日志写着「输入搜索关键词」，看起来一切正常。
+
+        这里刻意用没有提交按钮的搜索页：那种页面靠回车提交，才能验证
+        「输入失败 → 不发回车」。
+        """
+        no_button = [item for item in self.SEARCH_PAGE if item["text"] != "搜索"]
+        screens = [self.SEARCH_PANEL] + [no_button] * 8 + [DONE_ONLY]
+        context = FakeContext(screens)
+        context.controller.input_ok = False
+
+        actions.run_daily_loop(context, fast_config(), max_rounds=1)
+
+        self.assertEqual(len(context.controller.inputs), 1)
+        # 输入失败就不该再提交：回车提交的是空搜索，比不搜更浪费时间。
+        self.assertNotIn(66, context.controller.keys)
+        # 也要退出去，不能停在搜索页上继续重试同一个任务。
         self.assertIn(4, context.controller.keys)
 
 

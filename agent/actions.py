@@ -275,7 +275,15 @@ def _run_search(
 
     _click_item(context, box, delay=1.2)
     LOGGER.info("输入搜索关键词: %s", keyword)
-    _controller(context).post_input_text(keyword).wait()
+    # post_input_text 底层是 adb `input text`，它只认 ASCII：中文会让进程直接
+    # 抛 NullPointerException 失败。作业成败必须判，否则「输入失败 → 回车提交空
+    # 搜索 → 原地停留」会被当成搜索成功，任务进度一分不涨。
+    input_job = _controller(context).post_input_text(keyword)
+    input_job.wait()
+    if not _job_succeeded(input_job):
+        LOGGER.warning("关键词「%s」没有输入成功（adbd 的 input text 不支持非 ASCII）", keyword)
+        _back(context)
+        return False
     _sleep(0.8)
 
     # 输入完成后弹出输入法，搜索栏位置会变，提交按钮要重新找一次。

@@ -217,7 +217,7 @@ python -m tools.device_runner --user 999
 | 面板特征词 | `panel.PANEL_MARKERS` / `PANEL_MIN_HITS` | 面板识别不到，或首页被误判成面板 |
 | 按钮文案 | `panel.DEFAULT_ACTION_BUTTONS` | 任务识别出来了但没点按钮 |
 | 停留时长 | `config/tasks.json` 的 `timing` | 任务没被判完成 → 加长 |
-| 搜索词 | `config/tasks.json` 的 `search_keywords` | 搜出来的页面不像商品页 |
+| 搜索词 | `config/tasks.json` 的 `search_keywords` | 搜出来的页面不像商品页；词必须是纯 ASCII（见下） |
 
 ### 排错对照表
 
@@ -364,10 +364,15 @@ flowchart TD
 | `quiz_tasks` | 答题类（点进去是单选题，必须选答案并提交） |
 | `browse_tasks` | 普通浏览类 |
 | `safety_keywords` | 命中立即停止 |
-| `search_keywords` | 实际输入的搜索词（按轮次轮换） |
+| `search_keywords` | 实际输入的搜索词（按轮次轮换），**必须是纯 ASCII** |
 | `timing` | 任务间随机延迟、停留时长、最大空轮次数、单任务最大尝试次数 |
 
 分类优先级：**黑名单 → 已完成 → 搜索 → 跳转 → 答题 → 浏览 → unknown**。`unknown` 不会被点击。
+
+`search_keywords` 必须是纯 ASCII。输入走的是 adb 的 `input text`，它只认 ASCII，
+中文会让它抛 `NullPointerException` —— 手机上看不到任何报错，只是搜了个空，
+任务进度一分不涨。所以关键词输不进去时按失败处理并退出去，不再按回车
+提交一个空搜索。
 
 `quiz_tasks` 单列一类是因为它与浏览类的**完成条件不同**：「淘金币趣味课堂」这一行
 的说明文字是「参与答题」，点进去是一道单选题 + A/B 两个选项 + 底部「我选好了」。
