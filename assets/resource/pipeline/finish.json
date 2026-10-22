@@ -14,7 +14,7 @@
     "pre_delay": 300,
     "post_delay": 2000,
     "timeout": 8000,
-    "next": ["RewardConfirmed"],
+    "next": ["RewardConfirmed", "FinalStop"],
     "on_error": ["FinalStop"]
   },
   "RewardConfirmed": {

@@ -1121,6 +1121,27 @@ class DailyDoneTest(unittest.TestCase):
         self.assertNotIn("无法进入淘金币任务面板", joined)
         self.assertIn("今日任务已完成", joined)
 
+    def test_daily_done_screen_skips_the_loop(self) -> None:
+        """已经在完成提示页时不能再进日常循环。
+
+        入口节点同时认「任务面板」和「今日奖励已拿完」，于是两者都会走到循环；
+        循环再截一次整屏、判出同一屏已完成才退出。用户看到的是「已经报了完成，
+        后面又开始跑日常任务」，多花十几秒做一次没有意义的整屏 OCR。
+        """
+        context = FakeContext([DAILY_DONE_PAGE])
+        with self.assertLogs("autotaskflow", level="INFO") as logs:
+            result = actions.report_daily_done()
+
+        self.assertTrue(result)
+        # 不截图、不识别、不点击：这条支路只负责收尾。
+        self.assertEqual(context.controller.clicks, [])
+        self.assertIn("跳过日常任务循环", "\n".join(logs.output))
+
+    def test_daily_done_action_is_registered(self) -> None:
+        """Pipeline 的 DailyDoneCheck 走这个动作，必须真的注册过。"""
+        action_class = _registered_action("taobao_daily_done")
+        self.assertTrue(action_class().run(FakeContext([DAILY_DONE_PAGE]), None))
+
 
 class HomeMisjudgeTest(unittest.TestCase):
     """淘宝首页上有「立即领取」和「搜索」，不能因此被当成任务面板。"""

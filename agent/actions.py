@@ -650,6 +650,16 @@ def open_coin_page(context: Any, config: dict[str, Any]) -> bool:
     return True
 
 
+def report_daily_done() -> bool:
+    """在「今日奖励已拿完」这一屏上收尾，不再进日常循环。
+
+    这一屏说明今天的任务已经全部做完，走进循环只会再截一次整屏、再判一次
+    同一屏，然后原样退出来 —— 用户看到的现象是「已经报了完成，后面又开始
+    跑日常任务」。所以入口阶段就把这条支路截断。
+    """
+    LOGGER.info("今日任务已全部完成，跳过日常任务循环")
+    return True
+
 
 def run_daily_loop(context: Any, config: dict[str, Any], *, max_rounds: int = DEFAULT_MAX_ROUNDS) -> bool:
     """主循环：扫描 → 安全词检测 → 挑一个任务 → 执行 → 回来 → 重复。
@@ -910,6 +920,13 @@ def register(agent_server: Any) -> None:
                 LOGGER.error("读取任务配置失败：%s", exc)
                 return False
             return open_coin_page(context, config)
+
+    @agent_server.custom_action("taobao_daily_done")
+    class TaobaoDailyDone(CustomAction):
+        """今日任务全部完成时在完成提示页收尾，不进日常循环。"""
+
+        def run(self, context: Context, argv: Any) -> bool:
+            return report_daily_done()
 
     @agent_server.custom_action("taobao_abort")
     class TaobaoAbort(CustomAction):

@@ -399,6 +399,35 @@ def collect_custom_actions(nodes: dict[str, dict[str, Any]]) -> set[str]:
     }
 
 
+def always_hits(node: dict[str, Any]) -> bool:
+    """该节点是否必然命中。DirectHit 且没设命中上限时，识别阶段不会失败。"""
+    if node.get("recognition", "DirectHit") != "DirectHit":
+        return False
+    return "max_hit" not in node
+
+
+def find_dead_end_next(nodes: dict[str, dict[str, Any]]) -> list[str]:
+    """找出 next 候选列表必然全不命中、会把框架卡在重试里的节点。
+
+    MaaFramework 的 next 是候选列表：逐条识别，全都不命中就重新来过；
+    on_error 只在节点自身的识别/动作失败时才生效，**不会**在这时候兜底。
+    所以 next 的最后一条必须是必然命中的节点，否则整轮任务原地无限重试 ——
+    真机上的表现是日志停在最后一句话、进程不退出、只能手动结束。
+    """
+    dead_ends: list[str] = []
+    for name, node in nodes.items():
+        values = node.get("next")
+        if not values:
+            continue
+        if isinstance(values, str):
+            values = [values]
+        tail = strip_jump_back(values[-1])
+        target = nodes.get(tail)
+        if target is None or not always_hits(target):
+            dead_ends.append(f"{node['__file__']}:{name} -> {tail}")
+    return sorted(dead_ends)
+
+
 def collect_registered_actions() -> set[str]:
     """从 agent/ 源码里找出所有 @...custom_action("name") 注册名。"""
     pattern = re.compile(r"custom_action\(\s*[\"']([^\"']+)[\"']")
@@ -526,6 +555,13 @@ def validate() -> list[str]:
         raise ValidationError(
             f"Pipeline 引用了未注册的自定义动作: {', '.join(missing_actions)}"
             f"（已注册: {', '.join(sorted(registered)) or '无'}）"
+        )
+
+    dead_ends = find_dead_end_next(all_nodes)
+    if dead_ends:
+        raise ValidationError(
+            "next 的最后一个候选节点必须必然命中，否则框架会原地无限重试、"
+            "任务不会自行结束（on_error 在这种情况下不生效）: " + ", ".join(dead_ends)
         )
 
     rule_count = validate_task_config(read_json(TASK_CONFIG_FILE))

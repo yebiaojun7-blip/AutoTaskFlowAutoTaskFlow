@@ -87,6 +87,41 @@ class ReachabilityTest(unittest.TestCase):
         self.assertEqual(vp.find_unreachable(nodes, references, ["A"]), ["孤儿"])
 
 
+class DeadEndNextTest(unittest.TestCase):
+    """next 的最后一条必须必然命中，否则框架原地无限重试、任务不会自行结束。
+
+    真机事故：DailyTaskLoop 的 next 只有两个 OCR 节点，任务全部做完后的完成
+    提示页两个都不命中。MaaFramework 不会回落到 on_error，而是每秒重跑一次
+    识别列表，日志停在最后一句「今日任务已完成，正常结束」，进程一直不退出。
+    """
+
+    def test_next_ending_in_ocr_is_reported(self) -> None:
+        nodes = {
+            "Loop": {"__file__": "t.json", "next": ["[JumpBack]Safety", "Finish"]},
+            "Safety": {"__file__": "t.json", "recognition": "OCR", "expected": ["安全验证"]},
+            "Finish": {"__file__": "t.json", "recognition": "OCR", "expected": ["领取奖励"]},
+        }
+        self.assertEqual(vp.find_dead_end_next(nodes), ["t.json:Loop -> Finish"])
+
+    def test_next_ending_in_direct_hit_passes(self) -> None:
+        nodes = {
+            "Loop": {"__file__": "t.json", "next": ["Safety", "Stop"]},
+            "Safety": {"__file__": "t.json", "recognition": "OCR", "expected": ["安全验证"]},
+            "Stop": {"__file__": "t.json", "recognition": "DirectHit", "action": "StopTask"},
+        }
+        self.assertEqual(vp.find_dead_end_next(nodes), [])
+
+    def test_node_without_next_is_not_flagged(self) -> None:
+        """收尾节点本来就没有后继，不算死胡同。"""
+        nodes = {"Stop": {"__file__": "t.json", "recognition": "DirectHit", "action": "StopTask"}}
+        self.assertEqual(vp.find_dead_end_next(nodes), [])
+
+    def test_no_real_node_can_wedge_the_run(self) -> None:
+        """真实的 Pipeline 不允许出现会卡死的 next 列表。"""
+        nodes, _ = vp.load_pipeline(vp.ROOT / "assets" / "resource")
+        self.assertEqual(vp.find_dead_end_next(nodes), [])
+
+
 class RealProjectTest(unittest.TestCase):
     """真实的 interface.json / pipeline 必须能通过完整校验。"""
 

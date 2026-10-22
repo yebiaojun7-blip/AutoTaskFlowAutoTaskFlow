@@ -9,7 +9,7 @@
     "action": "Custom",
     "custom_action": "taobao_open_coin_page",
     "post_delay": 1500,
-    "next": ["WaitCoinPanel"],
+    "next": ["WaitCoinPanel", "AbortTask"],
     "on_error": ["AbortTask"]
   },
   "WaitCoinPanel": {
@@ -32,7 +32,14 @@
     "action": "DoNothing",
     "pre_delay": 1500,
     "timeout": 15000,
-    "next": ["DailyTaskLoop"],
+    "next": ["DailyDoneCheck", "DailyTaskLoop"],
     "on_error": ["AbortTask"]
+  },
+  "DailyDoneCheck": {
+    "recognition": "OCR",
+    "expected": ["奖励已拿完", "记得明天再来"],
+    "action": "Custom",
+    "custom_action": "taobao_daily_done",
+    "next": ["FinalStop"]
   }
 }

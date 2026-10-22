@@ -11,7 +11,7 @@
     "pre_delay": 300,
     "post_delay": 300,
     "timeout": 600000,
-    "next": ["[JumpBack]SafetyVerify", "FinishCheck"],
+    "next": ["[JumpBack]SafetyVerify", "FinishCheck", "FinalStop"],
     "on_error": ["AbortTask"]
   }
 }
