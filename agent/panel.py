@@ -169,6 +169,38 @@ def is_subtitle(text: str) -> bool:
     return _SUBTITLE_RE.match(task_key(text)) is not None
 
 
+# 任务名到下方说明文字的实际纵向距离：真机实测 34~43 像素，
+# 上下相邻两行任务间距约 140 像素，给到 60 不会串到下一行。
+_SUBTITLE_DY = 60
+# 说明文字与任务名左边缘的允许偏差。两者本来就左对齐，容差只为抵消 OCR 抖动，
+# 给太大反而会让它抓到同一行的其它文字块。
+_SUBTITLE_DX = 40
+
+
+def subtitle_for(items: Sequence[OcrItem], target: OcrItem) -> OcrItem | None:
+    """取任务名正下方那行说明文字（「点击去逛」「参与答题」「浏览15秒」）。
+
+    这两个字本身不能点，但它是**唯一能判断任务类型的地方**：面板上有的任务名
+    完全自造词（「去神奇海洋逛逛吧」「领闪购红包下单直接省」），不在任何名单里，
+    类型只写在副标题的「点击去逛」上。不读它，这两行就永远是 unknown、
+    永远不会被挑中，最后只剩别的任务被反复点。
+    """
+    best: OcrItem | None = None
+    best_dy = _SUBTITLE_DY + 1
+    for item in items:
+        if item is target or not is_subtitle(item.text):
+            continue
+        dy = item.y - target.y
+        if dy <= 0 or dy > _SUBTITLE_DY:
+            continue
+        if abs(item.x - target.x) > _SUBTITLE_DX:
+            continue
+        if dy < best_dy:
+            best = item
+            best_dy = dy
+    return best
+
+
 def task_finished(text: str) -> bool:
     """任务名里的进度已经做满（「逛清单，每15秒30金币(2/2)」）。
 
@@ -178,6 +210,41 @@ def task_finished(text: str) -> bool:
     """
     progress = task_progress(text)
     return progress is not None and progress[1] > 0 and progress[0] >= progress[1]
+
+
+# 右侧金币按钮的起点要比任务名右边缘再往右这么多，才算「本行的按钮」。
+# 真机上面板宽 720，任务名右边缘最宽到 501，金币从 600 起，留 20 的余量即可；
+# 而顶部「+180 额外得」那个汇总金币在 y=325，靠上面的纵向距离把它排除。
+_REWARD_MIN_GAP = 20
+# 金币与任务名的纵向偏移上限，与 find_action_button 保持一致。
+_REWARD_DY = ACTION_BUTTON_DY
+
+
+def has_actionable_control(
+    items: Sequence[OcrItem],
+    target: OcrItem,
+    buttons: Sequence[str] = DEFAULT_ACTION_BUTTONS,
+) -> bool:
+    """这一行的右侧是否还挂着可点的按钮（金币「+30」或「去完成」）。
+
+    这是判断「这一行到底做没做完」唯一可靠的信号：做完并领过奖的行，右侧金币
+    换成灰色对勾，而**对勾是图标、OCR 认不出文字**，任务名也不带「已完成」。
+    于是只剩「右侧还有没有按钮」这一条可用：有按钮说明还能拿，没有就是完了。
+
+    不做这个判断的后果是「任务到访得金币」这种行（没有 (x/y) 进度、做完后
+    文字不变）会被一直当成可执行任务，每轮点进去一次，直到轮次耗尽。
+
+    按钮文案与金币两种形态都要认：新版面板用金币当按钮，旧版是「去完成」。
+    """
+    name_right = target.x + target.width + _REWARD_MIN_GAP
+    for item in items:
+        if item is target or item.x < name_right:
+            continue
+        if abs(item.y - target.y) > _REWARD_DY:
+            continue
+        if _is_reward_badge(item.text) or _is_action_text(item.text, buttons):
+            return True
+    return False
 
 
 def _field(raw: Any, name: str, default: Any = None) -> Any:
@@ -682,12 +749,23 @@ def pick_task(
         if text in exclude:
             skipped.append(f"{item.text}(已放弃)")
             continue
-        decision = classify_task(item.text, config)
+        # 任务名认不出来时用副标题兜底：面板上有的任务名是自造词，类型只写在
+        # 「点击去逛」这种说明里，不看它这些行永远是 unknown、永远挑不到。
+        subtitle = subtitle_for(items, item)
+        decision = classify_task(
+            item.text, config, hint=subtitle.text if subtitle is not None else ""
+        )
         if decision.kind not in allowed:
             skipped.append(f"{item.text}({decision.reason or decision.kind})")
             continue
         if task_finished(item.text):
             skipped.append(f"{item.text}(已做满)")
+            continue
+        # 奖励已领走的行右侧金币换成灰色对勾，OCR 认不出对勾、任务名也不变，
+        # 只剩「右边还有没有按钮」这一个信号。不判它，「任务到访得金币」
+        # 这类无进度行会被当成可执行任务，每轮点进去一次直到轮次耗尽。
+        if not has_actionable_control(items, item):
+            skipped.append(f"{item.text}(右侧无按钮，已完成)")
             continue
         progress = task_progress(item.text)
         # 0 = 做到一半的优先，1 = 还没开始的，保持 discover 顺序稳定。

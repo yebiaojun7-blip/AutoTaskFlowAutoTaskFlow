@@ -84,8 +84,20 @@ def _contains_any(text: str, candidates: Iterable[str]) -> str:
     return ""
 
 
-def classify_task(text: str, config: dict[str, Any] | None = None) -> TaskDecision:
-    """按黑名单、已完成、搜索、跳转、答题、普通浏览的优先级分类任务。"""
+def classify_task(
+    text: str,
+    config: dict[str, Any] | None = None,
+    *,
+    hint: str = "",
+) -> TaskDecision:
+    """按黑名单、已完成、搜索、跳转、答题、普通浏览的优先级分类任务。
+
+    hint 是任务名下方那行说明文字（「点击去逛」「参与答题」「浏览15秒」）。
+    任务名本身认不出来时才用它兜底：面板上有的任务名完全是自造词
+    （「去神奇海洋逛逛吧」「领闪购红包下单直接省」），名单里永远匹配不到，
+    而类型其实写在副标题上。优先级仍以任务名为准 —— 副标题只是泛化描述，
+    例如「去芭芭农场逛一逛」名字里就带「逛一逛」，不该被副标题改判。
+    """
     config = config or load_config()
     normalized_text = "".join(text.split())
 
@@ -120,6 +132,37 @@ def classify_task(text: str, config: dict[str, Any] | None = None) -> TaskDecisi
     browse_hit = _contains_any(normalized_text, config.get("browse_tasks", []))
     if browse_hit:
         return TaskDecision("browse", browse_hit, "普通浏览任务")
+
+    return _classify_by_hint(hint, config)
+
+
+def _classify_by_hint(hint: str, config: dict[str, Any]) -> TaskDecision:
+    """任务名认不出来时，按副标题判类型。"""
+    normalized_hint = "".join((hint or "").split())
+    if not normalized_hint:
+        return TaskDecision("unknown", reason="未匹配到可执行名单")
+
+    # 「点击去逛」「去逛逛」这类副标题代表跳到外部页面或会场，
+    # 与 jump_tasks 里的任务同样处理：点进去、确认弹框、待够时长。
+    if _contains_any(normalized_hint, config.get("jump_tasks", [])):
+        return TaskDecision("jump", hint, "按任务说明判定为跳转类")
+
+    if _contains_any(normalized_hint, config.get("search_tasks", [])):
+        keywords = config.get("search_keywords", [])
+        return TaskDecision(
+            "search",
+            hint,
+            "按任务说明判定为搜索类",
+            str(keywords[0]) if keywords else "",
+        )
+
+    if _contains_any(normalized_hint, config.get("quiz_tasks", [])) or "答题" in normalized_hint:
+        return TaskDecision("quiz", hint, "按任务说明判定为答题类")
+
+    # 「浏览15秒」「浏览5秒」：任务名认不出来，但说明写明了是浏览。
+    # 只认带「浏览」的说明文字，不把任何副标题都当浏览任务处理。
+    if "浏览" in normalized_hint:
+        return TaskDecision("browse", hint, "按任务说明判定为浏览类")
 
     return TaskDecision("unknown", reason="未匹配到可执行名单")
 

@@ -358,7 +358,12 @@ class PickTaskTest(unittest.TestCase):
         self.assertIsNotNone(panel.pick_task(items, self.config, kinds=("browse",)).item)
 
     def test_search_decision_carries_keyword(self) -> None:
-        items = panel.parse_ocr_items([text_item("搜索商品", 100, 300)])
+        items = panel.parse_ocr_items(
+            [
+                text_item("搜索商品", 100, 300),
+                text_item("+30", 900, 300, 80, 40),
+            ]
+        )
         pick = panel.pick_task(items, self.config)
         assert pick.item is not None
         self.assertEqual(pick.decision.kind, "search")
@@ -418,6 +423,43 @@ class PickTaskTest(unittest.TestCase):
         pick = panel.pick_task(items, self.config)
         assert pick.item is not None
         self.assertEqual(pick.item.text, "浏览商品(1/5)")
+
+    def test_claimed_row_without_control_is_skipped(self) -> None:
+        """做完的行右侧金币会换成灰色对勾，OCR 看不到对勾也没有文字可判。
+
+        只剩「右边还有没有按钮」这一个信号，缺了它「任务到访得金币」
+        这种无进度行会被一直当成可执行任务点进去。
+        """
+        items = panel.parse_ocr_items(
+            [
+                text_item("赚金币抵钱", 100, 150, 300, 48),
+                text_item("任务到访得金币", 100, 300),
+                text_item("去神奇海洋逛逛吧", 100, 440),
+                text_item("点击去逛", 100, 480, 140, 34),
+                text_item("+30", 900, 440, 80, 40),
+            ]
+        )
+        pick = panel.pick_task(items, self.config)
+        assert pick.item is not None
+        self.assertEqual(pick.item.text, "去神奇海洋逛逛吧")
+        self.assertTrue(any("任务到访得金币" in entry for entry in pick.skipped))
+
+    def test_unknown_name_is_classified_by_its_subtitle(self) -> None:
+        """任务名是自造词（名单匹配不到），类型只写在下方说明里。"""
+        items = panel.parse_ocr_items(
+            [
+                text_item("赚金币抵钱", 100, 150, 300, 48),
+                text_item("去神奇海洋逛逛吧", 100, 440),
+                text_item("点击去逛", 100, 480, 140, 34),
+                text_item("+30", 900, 440, 80, 40),
+            ]
+        )
+        self.assertEqual(panel.classify_task("去神奇海洋逛逛吧").kind, "unknown")
+
+        pick = panel.pick_task(items, self.config)
+        assert pick.item is not None
+        self.assertEqual(pick.item.text, "去神奇海洋逛逛吧")
+        self.assertEqual(pick.decision.kind, "jump")
 
 
 class FindProgressTest(unittest.TestCase):
@@ -1396,11 +1438,12 @@ class ProgressTest(unittest.TestCase):
         self.assertEqual(len(context.controller.clicks), 2)
 
     def test_task_without_progress_field_is_also_abandoned(self) -> None:
-        """「点击去逛+30」没有 (x/y) 进度，靠执行次数兜底。"""
+        """没有 (x/y) 进度的行，靠执行次数兜底。"""
         stuck = [
             text_item("赚金币抵钱", 100, 150, 300, 48),
             text_item("今日累计奖励", 100, 220, 240, 40),
-            text_item("点击去逛+30", 100, 300),
+            text_item("浏览商品", 100, 300),
+            text_item("+30", 900, 300, 80, 40),
         ]
         context = FakeContext([stuck])
         result = actions.run_daily_loop(context, fast_config(), max_rounds=10)
