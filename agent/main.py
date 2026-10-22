@@ -22,12 +22,17 @@ def _setup_logging() -> None:
     # AgentError（红色报错档）——「第 2 轮：执行…」这种正常进度会全变成错误，
     # 真正的 traceback 也就淹没在里面了。stderr 只留给解释器与加载器自己的异常。
     #
+    # 级别前缀要留：客户端认的就是行首的 `[LEVEL]`，把它抬成日志条目的级别列，
+    # 再从正文里剥掉。写别的格式，级别就只剩正文里一串没人解析的方括号。
+    #
     # 不带时间戳：客户端日志面板每条本来就有一列时间，正文再带一遍就是
     # 「11:33:10 2026-10-22 11:33:10,966 [INFO] …」两段时间。
+    #
+    # 不带 logger 名：本项目只有一个 logger，每行重复一遍既占宽又没信息量。
     logging.basicConfig(
         level=logging.INFO,
         stream=sys.stdout,
-        format="[%(levelname)s] %(name)s: %(message)s",
+        format="[%(levelname)s] %(message)s",
     )
 
 
