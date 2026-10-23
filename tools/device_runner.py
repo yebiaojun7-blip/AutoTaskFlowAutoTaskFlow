@@ -246,7 +246,8 @@ def probe(tasker: Any) -> int:
             )
     else:
         LOGGER.info("当前屏幕没有可执行任务（跳过: %s）", "、".join(pick.skipped) or "无")
-    LOGGER.info("是否在淘金币面板: %s", panel.panel_visible(items))
+    LOGGER.info("是否在淘金币面板: %s", panel.task_panel_visible(items))
+    LOGGER.info("是否在双11赚能量面板: %s", panel.energy_panel_visible(items))
     LOGGER.info("当前页面类型: %s", _page_kind(items))
     return 0
 
@@ -257,8 +258,11 @@ def _page_kind(items: "list[Any]") -> str:
 
     if panel.daily_done_visible(items):
         return "今日任务已完成（正常结束）"
-    if panel.panel_visible(items):
-        return "任务面板"
+    # 能量面板必须先判：两个面板共用部分任务名，反过来的顺序会把它归成淘金币面板。
+    if panel.energy_panel_visible(items):
+        return "双11赚能量面板"
+    if panel.task_panel_visible(items):
+        return "淘金币任务面板"
     if panel.team_page_visible(items):
         return "组队活动页（应退出）"
     if panel.coin_home_visible(items):
@@ -272,8 +276,10 @@ def run_task(tasker: Any, entry: str, max_rounds: int | None = None) -> int:
     override = None
     if max_rounds is not None:
         # 第二个位置参数是 pipeline_override，用来临时覆盖节点参数。
+        # 两条任务链各有一个循环节点，一起覆盖，免得分不清跑的是哪条。
         override = {
-            "DailyTaskLoop": {"custom_action_param": json.dumps({"max_rounds": max_rounds})}
+            "DailyTaskLoop": {"custom_action_param": json.dumps({"max_rounds": max_rounds})},
+            "EnergyTaskLoop": {"custom_action_param": json.dumps({"max_rounds": max_rounds})},
         }
         LOGGER.info("本轮限制最多 %d 轮", max_rounds)
     detail = tasker.post_task(entry, override).wait().get()
