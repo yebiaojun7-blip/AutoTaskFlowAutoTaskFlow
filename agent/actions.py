@@ -16,7 +16,7 @@ import time
 from typing import Any, Callable, NamedTuple, Sequence, Callable, Sequence
 
 from agent import panel
-from agent.custom import app_user_id, load_config, start_app_command
+from agent.custom import apply_extra_rules, app_user_id, load_config, start_app_command
 
 LOGGER = logging.getLogger("autotaskflow")
 
@@ -969,6 +969,19 @@ def _parse_params(argv: Any) -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
+def _apply_extra_rules(config: dict[str, Any], params: dict[str, Any]) -> None:
+    """把界面上手动加的规则并进 config，并回显一行日志。
+
+    用户是在手机界面上加的规则，日志是他唯一能确认「真的加进去了」的地方，
+    否则规则写错只能从「任务没被跳过」这一个现象反推。
+    """
+    added = apply_extra_rules(config, params)
+    if added:
+        LOGGER.info("界面自定义规则已生效：%s", "，".join(added))
+    else:
+        LOGGER.info("界面自定义规则：未填写")
+
+
 def register(agent_server: Any) -> None:
     """把动作注册到 AgentServer。分离出来便于在没有 maa 时也能导入本模块。"""
 
@@ -1039,11 +1052,16 @@ def register(agent_server: Any) -> None:
 
     @agent_server.custom_action("taobao_daily_loop")
     class TaobaoDailyLoop(CustomAction):
-        """跑完一整轮淘金币日常任务。custom_action_param 支持 max_rounds 覆盖。"""
+        """跑完一整轮淘金币日常任务。
+
+        custom_action_param 支持 max_rounds 覆盖，以及界面上手动加的规则
+        （extra_skip / extra_jump / extra_search / extra_quiz / extra_browse）。
+        """
 
         def run(self, context: Context, argv: Any) -> bool:
+            params = _parse_params(argv)
             try:
-                max_rounds = int(_parse_params(argv).get("max_rounds", DEFAULT_MAX_ROUNDS))
+                max_rounds = int(params.get("max_rounds", DEFAULT_MAX_ROUNDS))
             except (TypeError, ValueError):
                 LOGGER.warning("max_rounds 不是整数，改用默认值 %d", DEFAULT_MAX_ROUNDS)
                 max_rounds = DEFAULT_MAX_ROUNDS
@@ -1054,6 +1072,7 @@ def register(agent_server: Any) -> None:
                 LOGGER.error("读取任务配置失败：%s", exc)
                 return False
 
+            _apply_extra_rules(config, params)
             LOGGER.info("===== 开始淘金币日常任务（最多 %d 轮）=====", max_rounds)
             return run_daily_loop(context, config, max_rounds=max_rounds)
 
@@ -1072,11 +1091,16 @@ def register(agent_server: Any) -> None:
 
     @agent_server.custom_action("taobao_energy_loop")
     class TaobaoEnergyLoop(CustomAction):
-        """跑完一整轮双11「做任务赚能量」。custom_action_param 支持 max_rounds 覆盖。"""
+        """跑完一整轮双11「做任务赚能量」。
+
+        custom_action_param 支持 max_rounds 覆盖，以及界面上手动加的规则
+        （extra_skip / extra_jump / extra_search / extra_quiz / extra_browse）。
+        """
 
         def run(self, context: Context, argv: Any) -> bool:
+            params = _parse_params(argv)
             try:
-                max_rounds = int(_parse_params(argv).get("max_rounds", DEFAULT_MAX_ROUNDS))
+                max_rounds = int(params.get("max_rounds", DEFAULT_MAX_ROUNDS))
             except (TypeError, ValueError):
                 LOGGER.warning("max_rounds 不是整数，改用默认值 %d", DEFAULT_MAX_ROUNDS)
                 max_rounds = DEFAULT_MAX_ROUNDS
@@ -1087,6 +1111,7 @@ def register(agent_server: Any) -> None:
                 LOGGER.error("读取任务配置失败：%s", exc)
                 return False
 
+            _apply_extra_rules(config, params)
             LOGGER.info("===== 开始双11赚能量任务（最多 %d 轮）=====", max_rounds)
             return run_energy_loop(context, config, max_rounds=max_rounds)
 

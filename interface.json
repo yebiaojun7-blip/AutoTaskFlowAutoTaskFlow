@@ -83,8 +83,73 @@
                     }
                 }
             ]
+        },
+        "自定义规则": {
+            "type": "input",
+            "label": "自定义规则（可选）",
+            "description": "图省事就别动它——内置名单已经覆盖现在面板上的任务。\n\n**什么时候用：** 面板上出现新的任务名，工具把它当「认不出来」跳过了，你又知道它属于哪一类，就往对应框里加几个词。\n\n**填法：** 一个框里可以写多个词，逗号、顿号、空格、换行都能分开。只要任务名**包含**这个词就算命中，所以写「快手」会把名字里带「快手」的任务全部跳过；词写得越短越容易误伤。\n\n**五个框的区别：**\n- **跳过**：点了也做不了的任务，直接不点（抢人助力、积分兑换、站外打卡这类）。优先级最高。\n- **跳转**：点进去、等十几秒、再返回。\n- **浏览**：点进去、停十几秒、再返回。\n- **搜索**：在里面输入关键词搜一下。\n- **答题**：点进去选一个答案。\n\n改完记得点保存；这两条任务下次运行时生效。要彻底保存到文件里，得改安装目录下的 `config/tasks.json`。",
+            "inputs": [
+                {
+                    "name": "extra_skip",
+                    "label": "跳过（不做）",
+                    "description": "任务名包含这些词就不点。用顿号或逗号隔开。",
+                    "default": "",
+                    "pipeline_type": "string"
+                },
+                {
+                    "name": "extra_jump",
+                    "label": "跳转任务",
+                    "description": "任务名包含这些词就当跳转类：点进去等一会儿再返回。",
+                    "default": "",
+                    "pipeline_type": "string"
+                },
+                {
+                    "name": "extra_browse",
+                    "label": "浏览任务",
+                    "description": "任务名包含这些词就当浏览类：点进去停留十几秒。",
+                    "default": "",
+                    "pipeline_type": "string"
+                },
+                {
+                    "name": "extra_search",
+                    "label": "搜索任务",
+                    "description": "任务名包含这些词就当搜索类。",
+                    "default": "",
+                    "pipeline_type": "string"
+                },
+                {
+                    "name": "extra_quiz",
+                    "label": "答题任务",
+                    "description": "任务名包含这些词就当答题类。",
+                    "default": "",
+                    "pipeline_type": "string"
+                }
+            ],
+            "pipeline_override": {
+                "DailyTaskLoop": {
+                    "custom_action_param": {
+                        "extra_skip": "{extra_skip}",
+                        "extra_jump": "{extra_jump}",
+                        "extra_browse": "{extra_browse}",
+                        "extra_search": "{extra_search}",
+                        "extra_quiz": "{extra_quiz}"
+                    }
+                },
+                "EnergyTaskLoop": {
+                    "custom_action_param": {
+                        "extra_skip": "{extra_skip}",
+                        "extra_jump": "{extra_jump}",
+                        "extra_browse": "{extra_browse}",
+                        "extra_search": "{extra_search}",
+                        "extra_quiz": "{extra_quiz}"
+                    }
+                }
+            }
         }
     },
+    "global_option": [
+        "自定义规则"
+    ],
     "agent": {
         "child_exec": "python",
         "child_args": [

@@ -196,6 +196,18 @@ OPTION_TYPES = ("select", "checkbox", "input", "hotkey", "switch")
 # 写错字段名框架会默默忽略，所以在这里白名单化。
 OPTION_OVERRIDE_FIELDS = ("custom_action_param", "enabled", "timeout", "expected", "next")
 
+# 界面上「自定义规则」里的五个输入框字段名。与 agent/custom.py 的
+# EXTRA_RULE_FIELDS 必须一致——两边写错一个，界面上填的词就会静默不生效。
+EXTRA_RULE_FIELDS = (
+    "extra_skip",
+    "extra_jump",
+    "extra_search",
+    "extra_quiz",
+    "extra_browse",
+)
+# input 类型配置项在 pipeline_override 里用 {字段名} 占位引用输入值。
+_PLACEHOLDER = re.compile(r"\{([^{}]+)\}")
+
 
 def validate_options(
     interface: dict[str, Any], nodes: dict[str, dict[str, Any]]
@@ -218,6 +230,12 @@ def validate_options(
         kind = option.get("type", "select")
         if kind not in OPTION_TYPES:
             raise ValidationError(f"{origin} 的 type 非法: {kind!r}")
+        if kind == "input":
+            # input 类型没有 cases，用户输入的值经 {字段名} 替换进 pipeline_override。
+            fields = _validate_input_fields(origin, option)
+            _validate_override(origin, option, nodes, input_fields=fields)
+            continue
+
         cases = option.get("cases")
         if not isinstance(cases, list) or not cases:
             raise ValidationError(f"{origin} 的 cases 必须是非空数组")
@@ -252,11 +270,41 @@ def validate_options(
                     f"任务 {task.get('name')} 引用了未定义的配置项: {referenced}"
                 )
 
+    # global_option 写错同样是「界面上没这个框」，必须校验。
+    for referenced in interface.get("global_option", []) or []:
+        if referenced not in options:
+            raise ValidationError(f"global_option 引用了未定义的配置项: {referenced}")
+
     return len(options)
 
 
+def _validate_input_fields(origin: str, option: dict[str, Any]) -> set[str]:
+    """校验 input 类型配置项的 inputs，返回输入字段名集合。"""
+    inputs = option.get("inputs")
+    if not isinstance(inputs, list) or not inputs:
+        raise ValidationError(f"{origin} 的 type 为 input，inputs 必须是非空数组")
+    names: set[str] = set()
+    for field in inputs:
+        if not isinstance(field, dict):
+            raise ValidationError(f"{origin} 的 inputs 元素必须是对象")
+        field_name = field.get("name")
+        if not isinstance(field_name, str) or not field_name:
+            raise ValidationError(f"{origin} 的 inputs 元素缺少 name")
+        if field_name in names:
+            raise ValidationError(f"{origin} 的输入字段重名: {field_name}")
+        names.add(field_name)
+        pipeline_type = field.get("pipeline_type", "string")
+        if pipeline_type not in ("string", "int", "bool"):
+            raise ValidationError(f"{origin} 的输入字段 {field_name} 的 pipeline_type 非法: {pipeline_type!r}")
+    return names
+
+
 def _validate_override(
-    origin: str, holder: dict[str, Any], nodes: dict[str, dict[str, Any]]
+    origin: str,
+    holder: dict[str, Any],
+    nodes: dict[str, dict[str, Any]],
+    *,
+    input_fields: set[str] | None = None,
 ) -> None:
     """检查一段 pipeline_override：节点必须存在，字段与取值都在允许范围内。"""
     override = holder.get("pipeline_override")
@@ -275,18 +323,39 @@ def _validate_override(
                 f"{origin} 的 pipeline_override[{node_name}] 含未支持字段: {', '.join(unknown)}"
             )
         if "custom_action_param" in patch:
-            _validate_action_param(f"{origin} 的 {node_name}", patch["custom_action_param"])
+            _validate_action_param(
+                f"{origin} 的 {node_name}", patch["custom_action_param"], input_fields or set()
+            )
 
 
-def _validate_action_param(origin: str, param: Any) -> None:
-    """custom_action_param 必须是对象，且 user_id（如有）必须是非负整数。"""
+def _validate_action_param(origin: str, param: Any, input_fields: set[str]) -> None:
+    """custom_action_param 必须是对象；已知字段逐个校验类型。
+
+    重点校验自定义规则字段：它们传到 Agent 后直接拼进名单，而界面填错、
+    字段名写错都不会报错，只会「规则没生效」。字符型字段允许写 {占位符}
+    （由 input 类配置项在运行时替换）。
+    """
     if not isinstance(param, dict):
         raise ValidationError(f"{origin} 的 custom_action_param 必须是对象")
-    if "user_id" not in param:
-        return
-    user_id = param["user_id"]
-    if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id < 0:
-        raise ValidationError(f"{origin} 的 custom_action_param.user_id 必须是非负整数")
+
+    if "user_id" in param:
+        user_id = param["user_id"]
+        if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id < 0:
+            raise ValidationError(f"{origin} 的 custom_action_param.user_id 必须是非负整数")
+
+    for field in EXTRA_RULE_FIELDS:
+        if field not in param:
+            continue
+        value = param[field]
+        if not isinstance(value, str):
+            raise ValidationError(
+                f"{origin} 的 custom_action_param.{field} 必须是字符串（词用逗号或顿号隔开）"
+            )
+        for referenced in _PLACEHOLDER.findall(value):
+            if referenced not in input_fields:
+                raise ValidationError(
+                    f"{origin} 的 custom_action_param.{field} 引用了未定义的输入字段: {referenced}"
+                )
 
 
 # --------------------------------------------------------------------------- #

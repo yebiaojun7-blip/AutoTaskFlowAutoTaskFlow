@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -13,6 +14,19 @@ DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "config" / "tasks.json
 
 # 覆盖 app.user_id 的环境变量，供不想改配置文件时使用。
 APP_USER_ENV = "AUTOTASKFLOW_APP_USER"
+
+# 界面上「自定义规则」配置项写进 custom_action_param 的字段名 → 对应的名单键。
+# 字段名用 ASCII 是为了 pipeline_override 里的 {占位符} 好读，中文只出现在界面标签上。
+EXTRA_RULE_FIELDS: dict[str, str] = {
+    "extra_skip": "blacklist",
+    "extra_jump": "jump_tasks",
+    "extra_search": "search_tasks",
+    "extra_quiz": "quiz_tasks",
+    "extra_browse": "browse_tasks",
+}
+
+# 一个输入框里可以写多个词，逗号、顿号、分号、空白都当分隔符。
+_RULE_SEPARATORS = re.compile(r"[,，、;；\s]+")
 
 
 @dataclass(frozen=True)
@@ -75,6 +89,49 @@ def start_app_command(package: str, activity: str, user_id: int) -> str:
     if not package or not activity:
         raise ValueError("package 与 activity 都不能为空")
     return f"am start --user {int(user_id)} -n {package}/{activity}"
+
+
+def split_rules(raw: Any) -> list[str]:
+    """把界面上一个输入框的内容拆成词表。
+
+    用户在手机上打字，分隔符不可控：可能用逗号、顿号，也可能一行一个。
+    空串、纯空白输入都返回空表，绝不能让一个空词进名单 —— 空词会被
+    _contains_any 判成「命中」，那样所有任务都会被跳过。
+    """
+    if not isinstance(raw, str):
+        return []
+    words: list[str] = []
+    for piece in _RULE_SEPARATORS.split(raw):
+        word = piece.strip()
+        if word and word not in words:
+            words.append(word)
+    return words
+
+
+def apply_extra_rules(config: dict[str, Any], params: dict[str, Any]) -> list[str]:
+    """把界面上手动加的规则并进名单，返回实际新增的「词(类别)」。
+
+    就地改 config：主循环、pick_task、classify_task 共用同一份配置对象，
+    在这里并一次就够，不必给每条调用链都加一个参数。
+
+    新词并按进对应名单，因此继承该类别原有的优先级（跳过最先判，浏览最后判）。
+    注意匹配是**包含**匹配：往跳过里写「快手」，任务名里带「快手」的都会跳过。
+    """
+    added: list[str] = []
+    for field, list_name in EXTRA_RULE_FIELDS.items():
+        words = split_rules(params.get(field))
+        if not words:
+            continue
+        existing = config.get(list_name)
+        if not isinstance(existing, list):
+            existing = []
+            config[list_name] = existing
+        for word in words:
+            if word in existing:
+                continue
+            existing.append(word)
+            added.append(f"{word}({list_name})")
+    return added
 
 
 def _contains_any(text: str, candidates: Iterable[str]) -> str:

@@ -274,6 +274,104 @@ class OptionTest(unittest.TestCase):
                     vp.validate_options(data, self.nodes())
 
 
+class InputOptionTest(unittest.TestCase):
+    """input 类型配置项（界面上的自定义规则），没有 cases，靠 inputs 撑界面。"""
+
+    def nodes(self) -> dict:
+        return {"DailyTaskLoop": {}, "EnergyTaskLoop": {}}
+
+    def interface(self, **overrides) -> dict:
+        data = {
+            "task": [{"name": "T", "entry": "DailyTaskLoop"}],
+            "global_option": ["自定义规则"],
+            "option": {
+                "自定义规则": {
+                    "type": "input",
+                    "inputs": [
+                        {"name": "extra_skip", "label": "跳过", "pipeline_type": "string"},
+                        {"name": "extra_jump", "label": "跳转", "pipeline_type": "string"},
+                    ],
+                    "pipeline_override": {
+                        "DailyTaskLoop": {
+                            "custom_action_param": {
+                                "extra_skip": "{extra_skip}",
+                                "extra_jump": "{extra_jump}",
+                            }
+                        }
+                    },
+                }
+            },
+        }
+        data.update(overrides)
+        return data
+
+    def test_input_option_without_cases_passes(self) -> None:
+        """input 靠 inputs 生成界面，没有 cases 是正常的。"""
+        self.assertEqual(vp.validate_options(self.interface(), self.nodes()), 1)
+
+    def test_input_without_inputs_fails(self) -> None:
+        data = self.interface()
+        data["option"]["自定义规则"].pop("inputs")
+        with self.assertRaises(vp.ValidationError):
+            vp.validate_options(data, self.nodes())
+
+    def test_duplicate_input_field_fails(self) -> None:
+        """重名字段在界面上会互相覆盖。"""
+        data = self.interface()
+        data["option"]["自定义规则"]["inputs"].append(
+            {"name": "extra_skip", "label": "又一个", "pipeline_type": "string"}
+        )
+        with self.assertRaises(vp.ValidationError):
+            vp.validate_options(data, self.nodes())
+
+    def test_bad_pipeline_type_fails(self) -> None:
+        data = self.interface()
+        data["option"]["自定义规则"]["inputs"][0]["pipeline_type"] = "list"
+        with self.assertRaises(vp.ValidationError):
+            vp.validate_options(data, self.nodes())
+
+    def test_placeholder_must_reference_a_declared_field(self) -> None:
+        """占位符写错，用户在界面上填的字进不了任务参数。"""
+        data = self.interface()
+        data["option"]["自定义规则"]["pipeline_override"]["DailyTaskLoop"][
+            "custom_action_param"
+        ]["extra_jump"] = "{extra_jumpp}"
+        with self.assertRaises(vp.ValidationError):
+            vp.validate_options(data, self.nodes())
+
+    def test_global_option_must_exist(self) -> None:
+        data = self.interface(global_option=["不存在的配置项"])
+        with self.assertRaises(vp.ValidationError):
+            vp.validate_options(data, self.nodes())
+
+    def test_extra_rule_field_must_be_string(self) -> None:
+        data = self.interface()
+        data["option"]["自定义规则"]["pipeline_override"]["DailyTaskLoop"][
+            "custom_action_param"
+        ]["extra_skip"] = ["快手"]
+        with self.assertRaises(vp.ValidationError):
+            vp.validate_options(data, self.nodes())
+
+    def test_extra_rule_fields_match_the_agent(self) -> None:
+        """校验器和 Agent 各存一份字段名，写岔一个就是「界面上填了没反应」。"""
+        from agent.custom import EXTRA_RULE_FIELDS
+
+        self.assertCountEqual(vp.EXTRA_RULE_FIELDS, EXTRA_RULE_FIELDS)
+
+    def test_real_interface_declares_every_extra_rule_field(self) -> None:
+        """真实 interface.json 里每个名单字段都得有对应的输入框和占位符。"""
+        interface = vp.read_json(vp.INTERFACE_FILE)
+        option = interface["option"]["自定义规则"]
+        self.assertEqual(
+            sorted(field["name"] for field in option["inputs"]),
+            sorted(vp.EXTRA_RULE_FIELDS),
+        )
+        for node in ("DailyTaskLoop", "EnergyTaskLoop"):
+            param = option["pipeline_override"][node]["custom_action_param"]
+            for field in vp.EXTRA_RULE_FIELDS:
+                self.assertEqual(param[field], "{%s}" % field)
+
+
 if __name__ == "__main__":
     logging.disable(logging.CRITICAL)
     unittest.main()
