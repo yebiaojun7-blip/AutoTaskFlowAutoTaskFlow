@@ -365,6 +365,22 @@ def find_text_by_keywords(
     return None
 
 
+def nav_title(items: Iterable[OcrItem]) -> OcrItem | None:
+    """当前屏的页面标题（带返回箭头的内层页），首页返回 None。
+
+    有它说明用户已经翻进了某一层内页（领券中心、商品详情、活动会场……）。
+    这些页面的正文里很常见「淘金币」三个字，例如领券中心的
+    「淘金币频道内，可叠加所有优惠」「淘金币频道到手价：」，「需淘金币1500」。
+    在这种页面上继续按「首页那一排图标」去找淘金币入口，就会点在纯文本上，
+    页面纹丝不动 —— 真机连点四次同一处，最后任务报「进不去面板」。
+    所以判断顺序必须是「先认出这是内页、按返回退出」，而不是继续找入口。
+    """
+    for item in items:
+        if any(glyph in item.text for glyph in NAV_GLYPHS):
+            return item
+    return None
+
+
 def panel_visible(
     items: Iterable[OcrItem],
     markers: Iterable[str] = PANEL_MARKERS,
@@ -836,8 +852,48 @@ def coin_entry_point(items: Sequence[OcrItem]) -> OcrItem | None:
     只认首页那一排图标的短标签。内层页面的标题里也有「淘金币」，例如答题页顶部
     的「←淘金币答题57464」、结果页的「淘金币抵扣」说明，直接按包含匹配会点进去
     出不来（点击后页面不变，于是每轮都重复点同一处）。
+
+    内层页面的**正文**同样会带「淘金币」：领券中心上就有「淘金币频道内，可叠加
+    所有优惠」「淘金币频道到手价：」「需淘金币1500」。这些都是句子或价格说明，
+    不是图标标签。首页的图标标签最长也就「领淘金币充值中心试用领取常买超市」
+    这种不带标点的短串，因此按「句子特征」排除：带冒号、带「频道/到手价/需」、
+    或明显偏长的块一律不算入口。
     """
-    return find_text_by_keywords(items, COIN_ENTRY_KEYWORDS, skip_nav_titles=True)
+    for item in items:
+        text = item.text
+        if any(glyph in text for glyph in NAV_GLYPHS):
+            continue
+        if _looks_like_sentence(text):
+            continue
+        for keyword in COIN_ENTRY_KEYWORDS:
+            if normalize_text(keyword) in text:
+                return item
+    return None
+
+
+# 内页正文的句子特征：冒号、逗号、句号，或价目说明里的这些词。
+# 首页图标那一排是扫码式的短标签，一个都不会带。
+_SENTENCE_MARKS = ("：", ":", "，", ",", "。", "、")
+_SENTENCE_WORDS = (
+    "频道",
+    "到手价",
+    "需淘金币",
+    "可叠加",
+    "优惠",
+    "折扣",
+    "抵扣",
+)
+# 首页图标标签拼在一起也就二十来个字，超过这个长度只能是段落文字。
+_ENTRY_MAX_LEN = 24
+
+
+def _looks_like_sentence(text: str) -> bool:
+    """这个文字块像不像一页正文，而不是一排图标里的短标签。"""
+    if len(text) > _ENTRY_MAX_LEN:
+        return True
+    if any(mark in text for mark in _SENTENCE_MARKS):
+        return True
+    return any(word in text for word in _SENTENCE_WORDS)
 
 
 def keyword_center(item: OcrItem, keyword: str) -> tuple[int, int] | None:

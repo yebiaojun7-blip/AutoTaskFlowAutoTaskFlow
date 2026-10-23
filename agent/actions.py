@@ -727,6 +727,15 @@ def _recover_to_panel(
                 _click_item(context, entry, delay=2.0)
                 continue
 
+        # 已经翻进了某一层内页（标题带返回箭头）。内页正文里同样有「淘金币」，
+        # 例如领券中心的「淘金币频道内，可叠加所有优惠」「需淘金币1500」，
+        # 落到下面的首页入口分支就会点在纯文本上，页面纹丝不动 —— 真机连点
+        # 四次同一处，最后报「进不去面板」。内页一律按返回退出，回首页再找入口。
+        if panel.nav_title(items) is not None:
+            LOGGER.info("当前在淘宝内层页面，返回退出后重新找入口")
+            _back(context)
+            continue
+
         entry = panel.coin_entry_point(items)
         if entry is not None:
             # 首页那一排图标常被 OCR 合并成一个文字块（例如

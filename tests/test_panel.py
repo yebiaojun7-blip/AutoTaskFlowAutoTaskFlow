@@ -1419,6 +1419,80 @@ class CoinEntryTest(unittest.TestCase):
             self.assertFalse(x < 400 and y < 150, f"点了答题页标题 {(x, y)}")
 
 
+# 真机 2026-10-23 14:53:34.391 的领券中心整屏，26 块原样抄自日志。
+# 点「去赚能量」本该打开能量面板，实际跳到了这一页；页面正文里到处是「淘金币」，
+# 于是被当成首页那排图标的入口，四次点击全打在同一处纯文本上。
+COUPON_PAGE = [
+    text_item("←领券中心62149", 452, 10, 182, 23),
+    text_item("5元待领加抵金", 453, 56, 111, 19),
+    text_item("¥5", 454, 96, 56, 53),
+    text_item("加抵金怎么用？", 466, 232, 154, 27),
+    text_item("淘金币频道到手价：", 468, 567, 146, 19),
+    text_item("淘金币频道内，可叠加所有优惠", 469, 267, 243, 18),
+    text_item("举个例子：商品原销售价", 469, 320, 191, 18),
+    text_item("加抵金", 469, 497, 35, 16),
+    text_item("满100元可用", 508, 100, 80, 19),
+    text_item("运动户外", 509, 121, 56, 20),
+    text_item("所有优惠都可叠加", 516, 387, 106, 20),
+    text_item("叠加加抵金折扣", 516, 484, 125, 22),
+    text_item("红包/88VIP消费券...", 517, 366, 157, 19),
+    text_item("淘金币基础折扣", 517, 427, 124, 19),
+    text_item("需淘金币1500", 518, 451, 82, 14),
+    text_item("需淘金币2000", 518, 510, 84, 15),
+    text_item("加抵金", 713, 206, 85, 74),
+    text_item("数量有限限时有效", 718, 59, 110, 13),
+    text_item("立即领取", 732, 112, 58, 19),
+    text_item("抵怎么用>", 757, 11, 68, 19),
+    text_item("¥45", 762, 559, 56, 32),
+    text_item("¥100", 768, 318, 50, 26),
+    text_item("-¥30", 768, 365, 49, 25),
+    text_item("-¥20", 768, 485, 49, 24),
+    text_item("-¥15", 772, 424, 46, 26),
+]
+
+
+class InnerPageTest(unittest.TestCase):
+    """内层页面的正文不能被当成首页图标入口。
+
+    真机 2026-10-23 14:53 那次：点「去赚能量」跳到了「←领券中心62149」，页面正文
+    写着「淘金币频道内，可叠加所有优惠」「需淘金币1500」，恢复流程把这些句子当成
+    首页那排图标的「淘金币」入口，14:53:34 / :47 / :54:01 / :15 四次点击全落在
+    (495, 276) 这一处纯文本上，页面一动不动，最后报「进不去双11赚能量面板」。
+    """
+
+    def setUp(self) -> None:
+        self.items = panel.parse_ocr_items(COUPON_PAGE)
+
+    def test_body_sentences_are_not_home_entry(self) -> None:
+        self.assertIsNone(panel.coin_entry_point(self.items))
+
+    def test_inner_page_is_recognised_by_its_nav_title(self) -> None:
+        title = panel.nav_title(self.items)
+        self.assertIsNotNone(title)
+        assert title is not None
+        self.assertIn("领券中心", title.text)
+
+    def test_home_has_no_nav_title(self) -> None:
+        """首页没有返回箭头，不能把首页误判成内页而按返回退出。"""
+        self.assertIsNone(panel.nav_title(panel.parse_ocr_items(DEVICE_HOME)))
+
+    def test_recover_leaves_the_coupon_page_by_back(self) -> None:
+        context = FakeContext([COUPON_PAGE] * 4 + [PANEL_ROW, DONE_ONLY])
+
+        actions._recover_to_panel(context, fast_config())
+
+        self.assertIn(4, context.controller.keys)
+        self.assertEqual(context.controller.clicks, [])
+
+    def test_short_icon_labels_are_still_entry(self) -> None:
+        """收紧匹配后，首页图标那一排的正常短标签必须还能认出来。"""
+        items = panel.parse_ocr_items(DEVICE_HOME)
+        entry = panel.coin_entry_point(items)
+        self.assertIsNotNone(entry)
+        assert entry is not None
+        self.assertEqual(entry.text, "领淘金币")
+
+
 class AppUserTest(unittest.TestCase):
     """应用分身跑在独立 Android 用户下（本机 999），必须按配置指定用户。"""
 
