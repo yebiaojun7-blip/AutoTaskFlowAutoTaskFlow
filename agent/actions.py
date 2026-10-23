@@ -154,13 +154,35 @@ _SCROLL_SAFE_BOTTOM = 0.85
 
 
 def _swipe_up(context: Any, *, delay: float = 1.0) -> None:
-    """从下方往上滑，用于把任务面板滚回顶部。"""
+    """从下方往上滑：手指向上，页面向下走一屏，露出列表**下面**的任务。"""
     width, height = _screen_size(context)
     x = width // 2
     start = int(height * _SCROLL_SAFE_BOTTOM)
     end = int(height * _SCROLL_SAFE_TOP)
     _controller(context).post_swipe(x, start, x, end, 400).wait()
     _sleep(delay)
+
+
+def _swipe_to_top(context: Any, *, delay: float = 1.0) -> None:
+    """从上方往下拖：页面向回走一屏，露出列表**上面**的任务。
+
+    方向和 _swipe_up 相反，两者不能混用。没做完的任务永远在面板顶部，
+    而「滑回顶部复查」曾经写成 _swipe_up —— 手指向上，页面反而继续往下走，
+    复查看到的是更下面那一批（真机 12:05:08 那一帧就是下面的任务），
+    顶部没做完的行再也回不到屏幕上。
+    """
+    width, height = _screen_size(context)
+    x = width // 2
+    start = int(height * _SCROLL_SAFE_TOP)
+    end = int(height * _SCROLL_SAFE_BOTTOM)
+    _controller(context).post_swipe(x, start, x, end, 400).wait()
+    _sleep(delay)
+
+
+def _scroll_to_top(context: Any, times: int) -> None:
+    """按「往下翻过几屏」原样拖回几屏，把面板恢复到顶部。"""
+    for _ in range(max(int(times), 0)):
+        _swipe_to_top(context)
 
 
 # 清单 / 会场 / 课堂这类页面靠滑动触发加载，页面静止不动就不再计时长，
@@ -885,8 +907,18 @@ def _run_panel_loop(
     # 上一轮收尾时已经是「面板 + 识别完成」的状态，界面在这之后没有任何操作，
     # 直接交给下一轮用，省掉一次整屏 OCR（真机上一次要好几秒）。
     pregained: list[panel.OcrItem] | None = None
+    # 本轮为了找屏外任务往下翻了几屏。面板会记住滚动位置：做完任务按返回回来时
+    # 还停在下方，而没做完的任务都在顶部 —— 不先拖回去，它们一整轮都轮不到，
+    # 最终被当成「没任务可做」收尾。
+    scrolled = 0
 
     for round_index in range(1, max_rounds + 1):
+        if scrolled:
+            LOGGER.info("第 %d 轮：面板停在下方，拖回顶部再挑任务", round_index)
+            _scroll_to_top(context, scrolled)
+            scrolled = 0
+            # 上一轮那份识别结果是下方那一屏的，位置已经变了，不能再沿用。
+            pregained = None
         if pregained is not None:
             items, pregained = pregained, None
         else:
@@ -938,8 +970,12 @@ def _run_panel_loop(
             if abandoned:
                 LOGGER.info("剩余任务都已尝试过 %d 次，无法继续推进，结束", max_attempts)
                 return True
-            LOGGER.info("第 %d 轮：当前屏无可执行任务，滑回顶部复查", round_index)
-            _swipe_up(context)
+            LOGGER.info("第 %d 轮：当前屏无可执行任务，拖回顶部复查", round_index)
+            # 必须拖到顶，不能只挪一小段：没做完的任务在面板最上方，
+            # 一次 36% 屏高的微调根本够不到，复查看到的还是同一批。
+            # 本轮往下翻过几屏，这里就拖回几屏再补一屏。
+            _scroll_to_top(context, scrolled + 1)
+            scrolled = 0
             items = _scan(context)
             safety = panel.find_safety(items, config.get("safety_keywords", []))
             if safety:
@@ -963,6 +999,7 @@ def _run_panel_loop(
                 break
             LOGGER.info("第 %d 轮：本屏都是做过的任务，往下翻一屏找新任务", round_index)
             _swipe_up(context)
+            scrolled += 1
             items = _scan(context)
             safety = panel.find_safety(items, config.get("safety_keywords", []))
             if safety:
@@ -985,6 +1022,11 @@ def _run_panel_loop(
         if _task_saturated(pick.item.text, tried):
             # 翻遍了也没找到新任务：退回原来那一个接着做，
             # 别让翻页把「唯一还能推进的任务」弄丢。
+            # 那两个坐标来自翻页前那一帧，屏幕必须先拖回同一位置，
+            # 否则点下去落在别的任务行上。
+            if scrolled:
+                _scroll_to_top(context, scrolled)
+                scrolled = 0
             pick, items = original, original_items
 
         name = panel.dedupe_key(pick.item.text)

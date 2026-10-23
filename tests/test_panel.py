@@ -2248,6 +2248,80 @@ class OffscreenTaskTest(unittest.TestCase):
         self.assertTrue(context.controller.swipes)
 
 
+class PanelScrollDirectionTest(unittest.TestCase):
+    """两个方向不能混用：往上看后面、往下回顶部。写反了任务就永远轮不到。
+
+    真机日志（run_20261023_114528）第 12 轮打出「滑回顶部复查」，实际发出的手势是
+    post_swipe y1=612 → y2=129，手指向上、页面继续往下走，复查看到的是列表**下方**
+    那批任务，顶部没做完的「逛清单(1/2)」「搜一搜(1/4)」再也回不到屏幕上。
+    """
+
+    def setUp(self) -> None:
+        self._original_sleep = actions._sleep
+        actions._sleep = lambda seconds: None
+        actions._FRAME_SIZE = (1280, 720)
+
+    def tearDown(self) -> None:
+        actions._sleep = self._original_sleep
+        actions._FRAME_SIZE = None
+
+    def test_swipe_up_moves_the_page_down(self) -> None:
+        """找屏外任务：手指往上（y 变小），页面往下走一屏。"""
+        context = FakeContext([PANEL_ROW], frame_size=(1280, 720))
+        actions._swipe_up(context, delay=0)
+
+        self.assertEqual(len(context.controller.swipes), 1)
+        _, y1, _, y2 = context.controller.swipes[0]
+        self.assertGreater(y1, y2, f"应当是往上滑，实际 ({y1} -> {y2})")
+
+    def test_swipe_to_top_moves_the_page_up(self) -> None:
+        """回顶部：手指往下（y 变大），页面往回升一屏。"""
+        context = FakeContext([PANEL_ROW], frame_size=(1280, 720))
+        actions._swipe_to_top(context, delay=0)
+
+        self.assertEqual(len(context.controller.swipes), 1)
+        _, y1, _, y2 = context.controller.swipes[0]
+        self.assertLess(y1, y2, f"应当是往下拖，实际 ({y1} -> {y2})")
+
+    def test_scroll_to_top_reverts_exactly_as_many_screens(self) -> None:
+        """往下翻过几屏就要拖回几屏，多一次会把列表拖出边界。"""
+        context = FakeContext([PANEL_ROW], frame_size=(1280, 720))
+
+        actions._scroll_to_top(context, 3)
+
+        self.assertEqual(len(context.controller.swipes), 3)
+        for _, y1, _, y2 in context.controller.swipes:
+            self.assertLess(y1, y2)
+
+    def test_recheck_scrolls_back_up_instead_of_further_down(self) -> None:
+        """「复查」这一支必须往下拖。写反了就是把没做完的任务越推越远。"""
+        claimed = [
+            text_item("赚金币抵钱", 100, 150, 300, 48),
+            text_item("今日累计奖励", 100, 220, 240, 40),
+            text_item("已领取", 100, 300),
+        ]
+        context = FakeContext([claimed, claimed], frame_size=(1280, 720))
+
+        actions.run_daily_loop(context, fast_config(), max_rounds=2)
+
+        # 面板上已无可执行任务 → 复查。这一步唯一的手势必须是「回顶部」。
+        self.assertTrue(context.controller.swipes)
+        _, y1, _, y2 = context.controller.swipes[0]
+        self.assertLess(y1, y2, f"复查时应当拖回顶部，实际 ({y1} -> {y2})")
+
+    def test_panel_is_pulled_back_to_top_before_picking_the_next_task(self) -> None:
+        """往下翻过后要先把面板拖回顶部，否则原坐标会点错行。"""
+        context = FakeContext([OffscreenTaskTest.ONSCREEN] * 6, frame_size=(1280, 720))
+
+        actions.run_daily_loop(context, fast_config(), max_rounds=2)
+
+        # 既有往上翻也有往回拖，两者方向相反。
+        ups = [s for s in context.controller.swipes if s[1] > s[3]]
+        downs = [s for s in context.controller.swipes if s[1] < s[3]]
+        self.assertTrue(ups, "没往下翻过，找屏外任务那一步没生效")
+        self.assertTrue(downs, "翻过之后没有拖回顶部，下一轮会在错误的位置点任务")
+
+
 class QuietLogTest(unittest.TestCase):
     """日志是给用户看的：坐标和跳转细节进 debug，别把主流程冲成一大段字符。"""
 
