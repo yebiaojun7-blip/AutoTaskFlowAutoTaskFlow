@@ -2007,8 +2007,64 @@ class EnergyPanelTest(unittest.TestCase):
         self.assertEqual(actions.ENERGY_PROFILE.home_entry, panel.ENERGY_HOME_ENTRY)
 
 
+# 真机失败帧（2026-10-23 12:08:20）：点「去赚能量」后弹出的跳转确认框，
+# 它背后**已经**是能量面板了。旧逻辑点完「打开」又补按了一次返回，
+# 把刚拿到的面板关掉，界面直接落进支付宝，任务以「进不去面板」失败。
+ENERGY_DIALOG_PANEL = [
+    text_item("“淘宝”想要打开“支付宝”小程序", 200, 520, 596, 52),
+    text_item("始终允许打开", 90, 600, 200, 40),
+    text_item("取消", 168, 660, 100, 50),
+    text_item("打开", 528, 660, 100, 50),
+] + ENERGY_PANEL
+
+# 真机失败帧（2026-10-23 12:09:16）：跳转确认后落到了支付宝首页。
+# 手机端控制器没有 shell，问不出前台包名，只能靠这些文字认出「不在淘宝里」。
+ALIPAY_HOME = [
+    text_item("看股票行情", 566, 128, 160, 36),
+    text_item("扫一扫", 40, 150, 100, 34),
+    text_item("收付款", 150, 150, 110, 34),
+    text_item("记账本", 620, 1300, 110, 32),
+    text_item("卡包", 480, 1300, 80, 32),
+    text_item("我的", 1120, 2000, 70, 32),
+]
+
+
+class ForeignAppTest(unittest.TestCase):
+    """没有 shell 时，也要能认出「已经不在淘宝里」。"""
+
+    def test_alipay_home_is_recognised(self) -> None:
+        self.assertTrue(panel.foreign_app_visible(panel.parse_ocr_items(ALIPAY_HOME)))
+
+    def test_taobao_panels_are_not_foreign(self) -> None:
+        """两个任务面板都不能被当成跳到了别的应用，否则会反复重启淘宝。"""
+        for name, screen in (("金币", DEVICE_PANEL), ("能量", ENERGY_PANEL)):
+            with self.subTest(name=name):
+                self.assertFalse(panel.foreign_app_visible(panel.parse_ocr_items(screen)))
+
+    def test_jumping_out_restarts_taobao_instead_of_pressing_back(self) -> None:
+        """落到支付宝后按返回只是退出支付宝，必须重新拉起淘宝。"""
+        context = FakeContext([ALIPAY_HOME, ENERGY_PANEL])
+
+        self.assertTrue(actions.open_energy_page(context, fast_config()))
+        self.assertTrue(
+            any("taobao" in shell for shell in context.controller.shells)
+        )
+
+
 class EnergyRecoverTest(unittest.TestCase):
     """进入能量面板的路径与淘金币面板共用，只有目标页和入口文字不同。"""
+
+    def test_dialog_over_the_panel_is_not_backed_out_of(self) -> None:
+        """确认框背后已经是能量面板时，点完「打开」不能再按返回。
+
+        按下返回就是把刚到手的面板关掉，界面落进支付宝，之后再也回不来。
+        真机上这条路径直接导致「双11赚能量」整轮失败。
+        """
+        context = FakeContext([ENERGY_DIALOG_PANEL, ENERGY_PANEL])
+
+        self.assertTrue(actions.open_energy_page(context, fast_config()))
+        # 只点了确认框上的「打开」，没有按返回。
+        self.assertNotIn(4, context.controller.keys)
 
     def test_coin_home_clicks_earn_energy(self) -> None:
         """在赛车首页上要按「赚能量」而不是「赚金币」进面板。"""

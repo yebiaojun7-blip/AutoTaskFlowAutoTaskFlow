@@ -433,7 +433,7 @@ def _run_task(
     # 这个框盖在面板上方且面板文字仍能被识别，不处理就会永远卡在这里。
     if kind == "jump":
         popped = _scan(context)
-        if panel.open_app_dialog_visible(popped) and _open_app_dialog_action(context, popped):
+        if panel.open_app_dialog_visible(popped) and _open_app_dialog_action(context, popped) is not None:
             LOGGER.info("已确认打开外部小程序，进去做任务「%s」", pick.item.text)
 
     required = panel.required_seconds(items, pick.item)
@@ -553,7 +553,9 @@ def _installed_packages(context: Any) -> set[str]:
     return packages
 
 
-def _open_app_dialog_action(context: Any, items: list[panel.OcrItem], *, tries: int = 3) -> bool:
+def _open_app_dialog_action(
+    context: Any, items: list[panel.OcrItem], *, tries: int = 3
+) -> list[panel.OcrItem] | None:
     """碰到「想要打开其他应用」确认框就点确认，真的跳进去做任务。
 
     跳外部应用的任务（蚂蚁庄园 / 蚂蚁森林 / 跳闲鱼 / 浏览器打开站外页）点击后
@@ -564,9 +566,11 @@ def _open_app_dialog_action(context: Any, items: list[panel.OcrItem], *, tries: 
     进去做完再由 _recover_to_panel 把淘宝拉回来。
 
     items 传入调用方已经拿到的识别结果，避免为了判断弹框再多截一次图。
-    返回是否真的点过确认框。
+
+    返回点击之后重新识别到的界面内容；没点过确认框时返回 None。这份结果必须交给
+    调用方：确认之后界面往往**已经**到了目标页面，再按一次返回会把它关掉。
     """
-    confirmed = False
+    after: list[panel.OcrItem] | None = None
     for _ in range(tries):
         if not panel.open_app_dialog_visible(items):
             break
@@ -575,9 +579,9 @@ def _open_app_dialog_action(context: Any, items: list[panel.OcrItem], *, tries: 
             break
         LOGGER.info("确认框点「%s」进入外部小程序", button.text)
         _click_item(context, button, delay=1.5)
-        confirmed = True
         items = _scan(context)
-    return confirmed
+        after = items
+    return after
 
 
 def _recover_to_panel(
@@ -631,7 +635,15 @@ def _recover_to_panel(
         # 确认框必须先于「在面板上」判断：它盖在面板上方，但面板文字依然能被识别，
         # 先判面板就会以为一切正常，然后不断点在弹框上。
         if panel.open_app_dialog_visible(items):
-            _open_app_dialog_action(context, items)
+            after = _open_app_dialog_action(context, items)
+            # 确认之后界面常常**已经**是目标页面了（点「去赚能量」时的跳转确认框
+            # 背后就是能量面板本身）。这里再按一次返回会把刚拿到的面板关掉，
+            # 一路退出淘宝。所以要先看确认后的界面，确实还没到才按返回。
+            if after is not None and (
+                profile.visible(after)
+                or (profile.daily_done and panel.daily_done_visible(after))
+            ):
+                return after
             _back(context)
             continue
 
