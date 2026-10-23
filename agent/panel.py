@@ -1018,7 +1018,11 @@ def dwell_seconds(kind: str, config: dict[str, Any], required: float = 0.0) -> f
     required 是任务自己写明的秒数（「浏览15秒」「每15秒30金币」），可能为 0。
     淘宝的浏览任务按「页面在动」累计时长，所以这个秒数就是真正的下限：
     停不够就去下一个任务，进度不会增加，等于白做一次。
-    配置里的时长只是没识别到要求时的兵底值。
+
+    配置里的时长只是**没识别到要求时的兜底值**，不能当成下限。把两者取 max 的
+    后果是配置值变成永远打不破的地板：配置 22 秒时，一个写着「浏览5秒」的任务
+    也要停满 22 秒 —— 多出来的 17 秒既拿不到额外奖励，也不推进任何进度，
+    纯粹是白等。
     """
     timing = config.get("timing", {})
     key = {
@@ -1027,7 +1031,6 @@ def dwell_seconds(kind: str, config: dict[str, Any], required: float = 0.0) -> f
     }.get(kind)
     if not key:
         return 0.0
-    total = float(timing.get(key, 3))
     if required > 0:
-        return max(total, required + DWELL_MARGIN)
-    return total
+        return required + DWELL_MARGIN
+    return float(timing.get(key, 3))

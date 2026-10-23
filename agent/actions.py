@@ -308,10 +308,14 @@ def _run_search(
     # 先等提交按钮出现，再按它的行去定位输入框：页面顶部的推广横幅也写着
     # 「搜索有福利」，只认「搜索」两个字会点到横幅上，输入框拿不到焦点，
     # 关键词敲进去就丢了（真机实测进度一直停在 1/3）。
+    #
+    # 重试次数按「页面加载要几秒」定，不是按「多试几次更保险」定：真机上一次
+    # 全屏 OCR 要十几到三十几秒，多留的每一次重试都是实打实的白等。搜索页通常
+    # 在第一次就绪，三次已经覆盖掉「点进去还没渲染完」这一种情况。
     items = _wait_for(
         lambda current: panel.search_submit_button(current) is not None,
         context,
-        tries=6,
+        tries=3,
         delay=1.5,
     )
     submit = panel.search_submit_button(items)
@@ -355,7 +359,7 @@ def _run_search(
     return True
 
 
-def _run_quiz(context: Any, *, tries: int = 5) -> bool:
+def _run_quiz(context: Any, *, tries: int = 3) -> bool:
     """答题任务：选一个选项 → 提交 → 等结果页，然后返回任务面板。
 
     「淘金币趣味课堂」点进去是一道二选一的单选题，不是浏览页。当成浏览任务
@@ -364,6 +368,9 @@ def _run_quiz(context: Any, *, tries: int = 5) -> bool:
 
     答案猜不出来也不需要猜 —— 任务文案是「参与答题」，不是「答对」。
     返回是否真的答完（看到结果页）。没答完时调用方必须把这次算作失败。
+
+    tries 同样按「真机一次 OCR 十几到三十几秒」来定：答题页只有一屏内容，
+    渲染完就一直在，多留的重试只会让失败路径白等两分钟。
     """
     items = _wait_for(lambda current: panel.quiz_option(current) is not None, context, tries=tries, delay=1.5)
     option = panel.quiz_option(items)
@@ -605,6 +612,19 @@ def _recover_to_panel(
         LOGGER.info("已重新打开淘宝，继续找%s", profile.name)
 
     home_tries = 0
+    # 上一次恢复动作的签名与它的重复次数。同一个动作重复出现说明它**没有改变
+    # 界面**：一遍又一遍地重做同一件事，每次中间隔着一整轮全屏 OCR（真机 20 秒
+    # 量级），能把一次失败放大成两三分钟的原地打转。重复到第二次就换更硬的手段。
+    last_action: str | None = None
+    repeats = 0
+
+    def note(action: str) -> int:
+        """记下这次要做的恢复动作，返回它连续重复了几遍。"""
+        nonlocal last_action, repeats
+        repeats = repeats + 1 if action == last_action else 1
+        last_action = action
+        return repeats
+
     for _ in range(tries):
         items = _scan(context)
 
@@ -648,6 +668,15 @@ def _recover_to_panel(
         if panel.coin_home_visible(items):
             entry = panel.find_text_by_keywords(items, profile.home_entry)
             if entry is not None:
+                if note("home-entry") >= 2:
+                    # 点了「赚金币」仍然停在首页，说明这一下没打开面板
+                    # （入口被浮层挡住、或点在了文字的空白处）。再点一次还是
+                    # 同样的结果，改成重开淘宝让页面回到干净状态。
+                    LOGGER.info("连续点「%s」仍未进入%s，重新启动淘宝", entry.text, profile.name)
+                    start_app(context, config)
+                    _sleep(3.0)
+                    repeats = 0
+                    continue
                 LOGGER.info("在淘金币首页，点击「%s」打开%s", entry.text, profile.name)
                 _click_item(context, entry, delay=2.0)
                 continue
@@ -661,6 +690,15 @@ def _recover_to_panel(
             for keyword in panel.COIN_ENTRY_KEYWORDS:
                 point = panel.keyword_center(entry, keyword)
                 if point is not None:
+                    if note("home-icon") >= 2:
+                        # 同上一处：连续两次点同一个图标都没进淘金币，
+                        # 说明这一下是空点，继续点只是在同一个界面上打转。
+                        LOGGER.info("连续点首页「%s」仍未进入淘金币，重新启动淘宝", keyword)
+                        start_app(context, config)
+                        _sleep(3.0)
+                        repeats = 0
+                        clicked = True
+                        break
                     LOGGER.info("在淘宝首页点击「%s」进入淘金币 (%d, %d)", keyword, *point)
                     _click(context, point[0], point[1], delay=3.0)
                     clicked = True
@@ -686,6 +724,9 @@ def _recover_to_panel(
 
         _back(context)
 
+    # 收尾必须补扫一次：最后一轮很可能刚点完「去赚金币」或刚按过返回，
+    # 界面是在那次动作之后才变成面板的，沿用动作前的识别结果会把这种刚好
+    # 成功的恢复误判成失败。这一次 OCR 是判断「到底回没回来」的唯一依据。
     items = _scan(context)
     return items if profile.visible(items) else None
 

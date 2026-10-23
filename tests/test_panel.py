@@ -937,6 +937,31 @@ class RecoverTest(unittest.TestCase):
         self.assertNotIn(4, context.controller.keys)
         self.assertTrue(any("taobao" in shell for shell in context.controller.shells))
 
+    def test_repeating_a_dead_click_restarts_taobao(self) -> None:
+        """同一屏上反复点同一个入口说明这一下没生效，第二次就该换手段。
+
+        每轮恢复中间隔着一整轮全屏 OCR（真机 20 秒量级），无脑重试能把一次误判
+        放大成两三分钟的原地打转；而重开淘宝能把界面拉回干净状态。
+        """
+        tries = 6
+        context = FakeContext([COIN_HOME] * tries)
+        actions._recover_to_panel(context, fast_config(), tries=tries)
+
+        # 原来每轮都点一次「赚金币」；现在点与重启交替，点多少次就重启多少次。
+        self.assertLess(len(context.controller.clicks), tries)
+        restarts = [s for s in context.controller.shells if "am start" in s and "taobao" in s]
+        self.assertTrue(restarts)
+
+    def test_home_icon_is_not_clicked_over_and_over(self) -> None:
+        """首页图标连点无效时同样要重启，不能让恢复流程在首页上转圈。"""
+        tries = 6
+        context = FakeContext([DEVICE_HOME] * tries)
+        actions._recover_to_panel(context, fast_config(), tries=tries)
+
+        self.assertLess(len(context.controller.clicks), tries)
+        restarts = [s for s in context.controller.shells if "am start" in s and "taobao" in s]
+        self.assertTrue(restarts)
+
 
 # 真机截图（应用分身 → 支付宝小程序）：横向排版，带「打开」按钮
 #   “淘宝(分身)”想要打开“支付宝”小程序 / □始终允许打开 / 取消 | 打开
