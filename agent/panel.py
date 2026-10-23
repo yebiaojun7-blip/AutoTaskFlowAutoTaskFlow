@@ -626,16 +626,19 @@ PROMO_LAYER_MIN_HITS = 2
 # 真机实测：弹窗标题「今日速赚570淘金币」，正文「今日快速赚奖励已拿完」「记得明天再来」。
 # OCR 有时把正文拆成几段，所以用「奖励已拿完」这种不含数字的短片段做匹配。
 # 这是正常结束，不能当成识别失败去走 AbortTask。
+#
+# 只放「完成」才有可能出现的说法。曾经收过「更多金币等你赚」，但它是面板底部的
+# 常驻推广语 —— 真机 12:05:08 那帧任务还剩四行没做，它照样显示，于是整轮任务
+# 被当成「今日已做完」提前收尾。这类招揽文案不能当完成证据。
 DAILY_DONE_MARKERS = (
     "奖励已拿完",
     "记得明天再来",
     "继续浏览精选清单",
-    "更多金币等你赚",
 )
 
 
 def daily_done_visible(items: Iterable[OcrItem]) -> bool:
-    """当前屏是否显示"今日任务已全部完成"提示。"""
+    """当前屏是否显示"今日任务全部完成"提示。"""
     return panel_visible(items, DAILY_DONE_MARKERS)
 
 
@@ -912,13 +915,19 @@ def pick_task(
         if task_finished(item.text):
             skipped.append(f"{item.text}(已做满)")
             continue
+        progress = task_progress(item.text)
         # 奖励已领走的行右侧金币换成灰色对勾，OCR 认不出对勾、任务名也不变，
         # 只剩「右边还有没有按钮」这一个信号。不判它，「任务到访得金币」
         # 这类无进度行会被当成可执行任务，每轮点进去一次直到轮次耗尽。
+        #
+        # 但这个信号只能用来**排除**，不能用来**认定**：金币按钮是独立的一小块，
+        # OCR 在一帧里漏掉它很常见（真机 12:04:46 那一整屏只认出顶部一个 +300，
+        # 四行的按钮全漏了），漏掉就被读成「已完成」，任务再也挑不到。
+        # 所以带 (1/2)(1/4) 这种没做满的进度、又缺按钮时，以进度为准放行。
         if not has_actionable_control(items, item):
-            skipped.append(f"{item.text}(右侧无按钮，已完成)")
-            continue
-        progress = task_progress(item.text)
+            if progress is None or progress[1] <= 0:
+                skipped.append(f"{item.text}(右侧无按钮，已完成)")
+                continue
         # 0 = 还没做过的，1 = 本次运行已经做过（可能还要多做几遍）。
         fresh = 0 if text not in tried else 1
         # 0 = 做到一半的优先，保持 discover 顺序稳定。

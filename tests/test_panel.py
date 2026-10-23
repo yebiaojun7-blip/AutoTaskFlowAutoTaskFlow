@@ -1112,6 +1112,44 @@ DAILY_DONE_PAGE = [
     text_item("记得明天再来", 280, 660, 160, 30),
 ]
 
+# 真机 2026-10-23 12:04:46.761 的整屏 OCR，18 块原样抄自日志。
+# 这一帧还在任务面板**顶部**：四行任务都没做满（(1/2)(1/4)），但右侧金币按钮
+# 一个都没被认出来，只有顶部汇总「+300」。当时整屏被判成「无可执行任务」，
+# 四行全进了「(右侧无按钮，已完成)」，顶部没做完的任务再也挑不到。
+PANEL_TOP_NO_BADGES = [
+    text_item("今日速赚830淘金币", 454, 181, 216, 26),
+    text_item("为你找到最简单的任务，3分钟即可完成", 453, 209, 232, 17),
+    text_item("完成下方任务得额外金币", 464, 250, 145, 17),
+    text_item("+300", 774, 260, 32, 16),
+    text_item("额外得", 766, 277, 43, 19),
+    text_item("逛清单，每15秒30金币(1/2)", 512, 325, 205, 19),
+    text_item("轻奢品质好物", 522, 416, 80, 15),
+    text_item("宿舍生活必备", 626, 414, 80, 18),
+    text_item("搜一搜你心仪的宝贝(1/4)", 513, 477, 181, 19),
+    text_item("浏览15秒", 512, 498, 57, 19),
+    text_item("任务到访得金币", 514, 558, 114, 19),
+    text_item("每日来任务面板", 513, 582, 92, 14),
+    text_item("淘金币趣味课堂", 513, 640, 115, 19),
+    text_item("参与答题", 512, 661, 57, 19),
+]
+
+# 真机 2026-10-23 12:05:08.348：面板被往下翻过一屏，任务还剩好几行没做，
+# 底部却常驻着「更多金币等你赚」这类招揽文案。
+PANEL_SCROLLED_WITH_PROMO = [
+    text_item("今日速赚830淘金币", 454, 181, 216, 26),
+    text_item("去神奇海洋逛逛吧", 512, 231, 133, 17),
+    text_item("点击去逛", 510, 251, 58, 19),
+    text_item("去支付宝农场逛逛哟", 512, 308, 148, 20),
+    text_item("点击去逛", 510, 332, 59, 18),
+    text_item("查看我的会员等级", 513, 390, 131, 18),
+    text_item("浏览5秒", 512, 412, 50, 19),
+    text_item("去省钱卡领红包", 512, 471, 116, 21),
+    text_item("浏览5秒", 512, 496, 49, 14),
+    text_item("换一换", 613, 534, 57, 20),
+    text_item("更多专享福利", 456, 594, 80, 14),
+    text_item("更多金币等你赚", 465, 643, 160, 18),
+]
+
 
 class DailyDoneTest(unittest.TestCase):
     def test_daily_done_marker_is_detected(self) -> None:
@@ -1166,6 +1204,62 @@ class DailyDoneTest(unittest.TestCase):
         """Pipeline 的 DailyDoneCheck 走这个动作，必须真的注册过。"""
         action_class = _registered_action("taobao_daily_done")
         self.assertTrue(action_class().run(FakeContext([DAILY_DONE_PAGE]), None))
+
+    def test_promo_line_on_a_live_panel_is_not_daily_done(self) -> None:
+        """面板底部的招揽文案不能当成「今日已完成」。
+
+        「更多金币等你赚」在任务还剩好几行没做的面板上照样显示（真机 12:05:08），
+        把它列进完成特征词，一整轮任务会被当成已做完提前收尾。
+        """
+        items = panel.parse_ocr_items(PANEL_SCROLLED_WITH_PROMO)
+        self.assertFalse(panel.daily_done_visible(items))
+
+    def test_live_panel_with_promo_is_still_a_task_panel(self) -> None:
+        items = panel.parse_ocr_items(PANEL_SCROLLED_WITH_PROMO)
+        self.assertTrue(panel.task_panel_visible(items))
+
+
+class MissingBadgeTest(unittest.TestCase):
+    """金币按钮 OCR 漏认时，不能据此认定「这一行已完成」。
+
+    真机 12:04:46 那一帧：四行任务都没做满，进度写着 (1/2)(1/4)，但右侧金币
+    一个都没认出来，只有顶部汇总一个 +300。旧逻辑按「右侧无按钮」把它们全判成
+    已完成，面板上就再没有可执行任务了 —— 于是顶部这些没做完的任务永远轮不到。
+    """
+
+    def setUp(self) -> None:
+        self.items = panel.parse_ocr_items(PANEL_TOP_NO_BADGES)
+        self.config = load_config()
+
+    def test_unfilled_progress_without_badge_is_still_pickable(self) -> None:
+        pick = panel.pick_task(self.items, self.config)
+        self.assertIsNotNone(pick.item, f"整屏没挑出任务，跳过项：{pick.skipped}")
+        assert pick.item is not None
+        self.assertIn("(1/", pick.item.text)
+
+    def test_completed_rows_are_still_skipped_without_badges(self) -> None:
+        """没进度的行缺按钮仍按已完成处理，否则「任务到访得金币」会被反复点。"""
+        items = panel.parse_ocr_items(
+            [
+                text_item("赚金币抵钱", 100, 150, 300, 48),
+                text_item("任务到访得金币", 100, 280, 202, 33),
+                text_item("每日来任务面板", 100, 320, 165, 28),
+            ]
+        )
+        pick = panel.pick_task(items, self.config)
+        self.assertIsNone(pick.item)
+        self.assertTrue(any("任务到访得金币" in entry for entry in pick.skipped))
+
+    def test_full_progress_without_badge_is_skipped_as_done(self) -> None:
+        items = panel.parse_ocr_items(
+            [
+                text_item("赚金币抵钱", 100, 150, 300, 48),
+                text_item("逛清单，每15秒30金币(2/2)", 100, 300, 371, 37),
+            ]
+        )
+        pick = panel.pick_task(items, self.config)
+        self.assertIsNone(pick.item)
+        self.assertTrue(any("已做满" in entry for entry in pick.skipped))
 
 
 class HomeMisjudgeTest(unittest.TestCase):
