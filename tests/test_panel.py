@@ -2052,6 +2052,173 @@ class EnergyLoopTest(unittest.TestCase):
         self.assertEqual(context.controller.clicks, [(628, 587)])
 
 
+class SparsePanelTest(unittest.TestCase):
+    """任务快做完时的面板：汇总文案全部滚出屏幕，只剩任务行和「换一换」。
+
+    真机实证（delegate 截图 err1.png）：这一屏上「完成下方任务得额外金币」
+    「任务到访得金币」都不在了，只靠老的汇总文案判定就会认成「不在任务面板」，
+    于是每轮都去首页点「淘金币」入口，六次之后判定失败。
+    """
+
+    # 真机（一加 Ace 3 PJE110 / 淘宝 2026-10-23）这一屏的 OCR 布局。
+    SPARSE_PANEL = [
+        text_item("61889>", 420, 130, 120, 36),
+        text_item("今日速赚830淘金币", 28, 188, 377, 47),
+        text_item("为你找到最简单的任务，3分钟即可完成", 32, 240, 400, 24),
+        text_item("点击去逛", 128, 275, 98, 30),
+        text_item("去蚂蚁森林收能量", 130, 300, 202, 33),
+        text_item("点击去逛", 128, 340, 98, 30),
+        text_item("+50", 602, 305, 53, 31),
+        text_item("去省钱卡领红包", 130, 400, 250, 33),
+        text_item("浏览5秒", 128, 440, 92, 34),
+        text_item("+30", 601, 405, 56, 38),
+        text_item("淘金币趣味课堂", 130, 490, 204, 33),
+        text_item("参与答题", 128, 530, 100, 35),
+        text_item("去支付宝农场逛逛哟", 130, 570, 230, 28),
+        text_item("点击去逛", 128, 610, 98, 30),
+        text_item("查看我的会员等级", 130, 650, 230, 28),
+        text_item("浏览5秒", 126, 690, 92, 34),
+        text_item("换一换", 290, 720, 80, 30),
+    ]
+
+    def setUp(self) -> None:
+        self.items = panel.parse_ocr_items(self.SPARSE_PANEL)
+        self.config = load_config()
+
+    def test_panel_without_summary_text_is_still_the_panel(self) -> None:
+        self.assertTrue(panel.task_panel_visible(self.items))
+
+    def test_summary_markers_are_really_absent(self) -> None:
+        texts = "".join(item.text for item in self.items)
+        self.assertNotIn("完成下方任务得额外金币", texts)
+        self.assertNotIn("任务到访得金币", texts)
+
+    def test_row_structure_alone_is_not_enough(self) -> None:
+        """只数一条任务行太松：商品详情页也可能有一个「+50」。"""
+        thin = [text_item("某商品", 130, 300, 200, 33), text_item("+50", 602, 305, 53, 31)]
+        self.assertFalse(panel.task_panel_visible(panel.parse_ocr_items(thin)))
+
+    def test_home_tab_bar_vetoes_the_row_fallback(self) -> None:
+        """首页也可能有「+50」之类的碎片，底部标签栏在就不能按行结构认面板。"""
+        rows_only = [
+            text_item("去省钱卡领红包", 130, 400, 250, 33),
+            text_item("浏览5秒", 128, 440, 92, 34),
+            text_item("+30", 601, 405, 56, 38),
+            text_item("我的淘宝", 560, 700, 120, 40),
+        ]
+        self.assertFalse(panel.task_panel_visible(panel.parse_ocr_items(rows_only)))
+
+    def test_first_task_is_picked_here(self) -> None:
+        pick = panel.pick_task(self.items, self.config)
+        self.assertIsNotNone(pick.item)
+        assert pick.item is not None
+        self.assertEqual(pick.item.text, "去蚂蚁森林收能量")
+
+    def test_tried_task_falls_behind_a_fresh_one(self) -> None:
+        """已经做过的任务要排到没做过的后面，否则屏外的任务永远轮不到。"""
+        pick = panel.pick_task(
+            self.items, self.config, tried={"去蚂蚁森林收能量"}
+        )
+        assert pick.item is not None
+        self.assertEqual(pick.item.text, "去省钱卡领红包")
+
+
+class OffscreenTaskTest(unittest.TestCase):
+    """面板一屏只显示几行，屏外的「去蚂蚁森林收能量」OCR 根本看不到。
+
+    真机日志（run4.txt）里第 4/5/6/9/10 轮点到的是同一个 y 坐标、同一行
+    「拍立淘逛感兴趣的宝贝」，说明全程没有翻过页，蚂蚁森林一次都没出现。
+    """
+
+    ONSCREEN = [
+        text_item("今日速赚830淘金币", 28, 188, 377, 47),
+        text_item("为你找到最简单的任务，3分钟即可完成", 32, 240, 400, 24),
+        text_item("去省钱卡领红包", 130, 400, 250, 33),
+        text_item("浏览5秒", 128, 440, 92, 34),
+        text_item("+30", 601, 405, 56, 38),
+        text_item("换一换", 290, 720, 80, 30),
+    ]
+
+    BELOW_THE_FOLD = [
+        text_item("今日速赚830淘金币", 28, 188, 377, 47),
+        text_item("为你找到最简单的任务，3分钟即可完成", 32, 240, 400, 24),
+        text_item("去蚂蚁森林收能量", 130, 300, 202, 33),
+        text_item("点击去逛", 128, 340, 98, 30),
+        text_item("+50", 602, 305, 53, 31),
+        text_item("换一换", 290, 720, 80, 30),
+    ]
+
+    def setUp(self) -> None:
+        self._original_sleep = actions._sleep
+        actions._sleep = lambda seconds: None
+
+    def tearDown(self) -> None:
+        actions._sleep = self._original_sleep
+
+    def test_loop_scrolls_down_to_reach_a_task_below_the_fold(self) -> None:
+        screens = [self.ONSCREEN, self.ONSCREEN, self.BELOW_THE_FOLD, self.BELOW_THE_FOLD]
+        context = FakeContext(screens)
+
+        actions.run_daily_loop(context, fast_config(), max_rounds=2)
+
+        # 第一轮做屏上的省钱卡，第二轮本屏只剩做过的任务 → 往下翻 → 做蚂蚁森林。
+        self.assertIn((629, 424), context.controller.clicks)
+        self.assertIn((628, 320), context.controller.clicks)
+        self.assertTrue(context.controller.swipes)
+
+
+class QuietLogTest(unittest.TestCase):
+    """日志是给用户看的：坐标和跳转细节进 debug，别把主流程冲成一大段字符。"""
+
+    def setUp(self) -> None:
+        self._original_sleep = actions._sleep
+        actions._sleep = lambda seconds: None
+
+    def tearDown(self) -> None:
+        actions._sleep = self._original_sleep
+
+    def test_click_coordinates_are_not_in_the_user_log(self) -> None:
+        context = FakeContext([PANEL_ROW, DONE_ONLY, DONE_ONLY])
+        with self.assertLogs("autotaskflow", level="INFO") as logs:
+            actions.run_daily_loop(context, fast_config(), max_rounds=1)
+
+        joined = "\n".join(logs.output)
+        self.assertNotIn("点击 (", joined)
+        self.assertNotIn("按下回车", joined)
+
+    def test_skipped_list_is_compacted(self) -> None:
+        """十几条界面碎片不该整段铺出来，而且没有意义的碎片要滤掉。"""
+        skipped = tuple(f"碎片{i}(未匹配到可执行名单)" for i in range(13)) + (
+            "邀请好友(黑名单)",
+            "已做完(右侧无按钮，已完成)",
+        )
+        with self.assertLogs("autotaskflow", level="INFO") as logs:
+            actions._log_skipped(skipped)
+
+        self.assertEqual(len(logs.output), 1)
+        line = logs.output[0]
+        self.assertNotIn("未匹配到可执行名单", line)
+        self.assertIn("邀请好友(黑名单)", line)
+
+    def test_skipped_list_caps_the_listed_entries(self) -> None:
+        skipped = tuple(f"任务{i}(黑名单)" for i in range(9))
+        with self.assertLogs("autotaskflow", level="INFO") as logs:
+            actions._log_skipped(skipped)
+
+        line = logs.output[0]
+        self.assertIn("任务0(黑名单)", line)
+        self.assertNotIn("任务4(黑名单)", line)
+        self.assertIn("等 9 项", line)
+
+    def test_unfilled_extra_rules_do_not_log_at_info(self) -> None:
+        """没填规则是常态，不该每轮刷一行「未填写」出来。"""
+        with self.assertLogs("autotaskflow", level="DEBUG") as logs:
+            actions._apply_extra_rules({"blacklist": []}, {})
+
+        self.assertTrue(all("未填写" in line for line in logs.output))
+        self.assertFalse(any(line.startswith("INFO") for line in logs.output))
+
+
 if __name__ == "__main__":
     logging.disable(logging.CRITICAL)
     unittest.main()

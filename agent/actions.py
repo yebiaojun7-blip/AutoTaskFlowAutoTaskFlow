@@ -29,6 +29,15 @@ DEFAULT_MAX_ROUNDS = 20
 # 主动安全停止的返回标记：让 Pipeline 走 on_error → StopTask。
 STOP_SIGNAL = False
 
+# 「本轮不可执行项」日志里最多列几条。屏上认出的界面碎片可以有十几条，
+# 全铺出来没人看得下去，剩下的只进 debug。
+_SKIPPED_LOG_LIMIT = 4
+
+# 一屏任务都做过时，最多再往下翻几屏去找没做过的任务。
+# 面板一屏大约 6 行、整个列表十来行，翻 3 屏足够到底；不设上限会在到底之后
+# 反复滑动，把轮次全耗在滑动手势上。
+_PANEL_SCROLL_DEPTH = 3
+
 
 class PanelProfile(NamedTuple):
     """一个任务面板的差异点。
@@ -106,7 +115,8 @@ def _ocr_items(context: Any, image: Any, node: str) -> list[panel.OcrItem]:
 
 
 def _click(context: Any, x: int, y: int, *, delay: float = 1.0) -> None:
-    LOGGER.info("点击 (%d, %d)", x, y)
+    # 坐标是排查用的细节，不是给用户看的流程：调用方已经说清点了什么、为什么点。
+    LOGGER.debug("点击 (%d, %d)", x, y)
     _controller(context).post_click(x, y).wait()
     _sleep(delay)
 
@@ -118,7 +128,7 @@ def _click_item(context: Any, item: panel.OcrItem, *, delay: float = 1.0) -> Non
 
 def _back(context: Any, *, delay: float = 1.2) -> None:
     """Android KEYCODE_BACK。Pipeline 里等价于 ClickKey key:[4]。"""
-    LOGGER.info("返回")
+    LOGGER.debug("返回")
     _controller(context).post_click_key(4).wait()
     _sleep(delay)
 
@@ -130,7 +140,7 @@ _KEYCODE_ENTER = 66
 
 def _enter(context: Any, *, delay: float = 1.0) -> None:
     """按一次回车，用于提交搜索。"""
-    LOGGER.info("按下回车")
+    LOGGER.debug("按下回车")
     _controller(context).post_click_key(_KEYCODE_ENTER).wait()
     _sleep(delay)
 
@@ -421,12 +431,8 @@ def _run_task(
 
     required = panel.required_seconds(items, pick.item)
     total = panel.dwell_seconds(kind, config, required)
-    LOGGER.info(
-        "任务类型 %s，任务要求停留 %.0f 秒，实际停留 %.1f 秒",
-        kind,
-        required,
-        total,
-    )
+    if required > 0:
+        LOGGER.info("任务要求停留 %.0f 秒，实际停留 %.0f 秒", required, total)
     # 浏览类和跳转到的会场页都是靠页面在动才累计，停留期间必须持续滑动。
     _dwell(context, total, scroll=kind in ("browse", "jump"))
     _back(context)
@@ -475,7 +481,7 @@ def start_app(context: Any, config: dict[str, Any], user_id: int | None = None) 
         )
         return False
 
-    LOGGER.warning("当前控制器没有 shell 能力，改用框架 StartApp 启动 %s", package)
+    LOGGER.debug("控制器没有 shell 能力，改用框架 StartApp 启动 %s", package)
     try:
         job = _controller(context).post_start_app(package)
         job.wait()
@@ -655,7 +661,7 @@ def _recover_to_panel(
             for keyword in panel.COIN_ENTRY_KEYWORDS:
                 point = panel.keyword_center(entry, keyword)
                 if point is not None:
-                    LOGGER.info("在淘宝首页点击「%s」进入淘金币 %s", keyword, point)
+                    LOGGER.info("在淘宝首页点击「%s」进入淘金币 (%d, %d)", keyword, *point)
                     _click(context, point[0], point[1], delay=3.0)
                     clicked = True
                     break
@@ -745,6 +751,44 @@ def run_energy_loop(context: Any, config: dict[str, Any], *, max_rounds: int = D
     return _run_panel_loop(context, config, profile=ENERGY_PROFILE, max_rounds=max_rounds)
 
 
+def _log_skipped(skipped: Sequence[str], *, prefix: str = "本轮不可执行项") -> None:
+    """把「本轮没挑中的项」压缩成一行给人看的日志。
+
+    skipped 里绝大多数是 OCR 认出来的界面碎片（「61679>」「×」「は」「10」），
+    它们既不是任务也没法执行，原样铺出来会把日志冲成一大段看不懂的字符。
+    这里只保留**有意义的跳过原因**（黑名单、已做完、已放弃、没装应用），
+    并给条数封顶；完整清单降到 debug，排查时仍然拿得到。
+    """
+    if not skipped:
+        return
+    LOGGER.debug("本轮全部跳过项：%s", ", ".join(skipped))
+
+    meaningful = [
+        entry for entry in skipped if not entry.endswith("(未匹配到可执行名单)")
+    ]
+    if not meaningful:
+        LOGGER.info("%s：%d 条界面文字都不像任务", prefix, len(skipped))
+        return
+    shown = ", ".join(meaningful[:_SKIPPED_LOG_LIMIT])
+    more = len(meaningful) - _SKIPPED_LOG_LIMIT
+    LOGGER.info("%s：%s%s", prefix, shown, f" 等 {len(meaningful)} 项" if more > 0 else "")
+
+
+def _task_saturated(text: str, tried: dict[str, int]) -> bool:
+    """这个任务是不是「做也白做」，该往下找别的了。
+
+    「拍立淘(2/5)」这类带进度的任务，做过一次仍然要把剩下的格数做完，
+    不能因为出现过就跳过；只有进度已经做满、或本来就读不到进度
+    （「任务到访得金币」那种纯汇总行）时，才算它占住了这一屏。
+    """
+    if panel.dedupe_key(text) not in tried:
+        return False
+    progress = panel.task_progress(text)
+    if progress is None:
+        return True
+    return progress[0] >= progress[1]
+
+
 def _run_panel_loop(
     context: Any,
     config: dict[str, Any],
@@ -814,7 +858,7 @@ def _run_panel_loop(
                 LOGGER.info("面板上已无可执行任务，今日任务已全部完成")
             return True
 
-        pick = panel.pick_task(items, config, exclude=abandoned)
+        pick = panel.pick_task(items, config, exclude=abandoned, tried=tried)
         if pick.item is not None and installed and panel.task_unreachable(pick.item.text, installed):
             package = panel.required_package(pick.item.text)
             LOGGER.warning(
@@ -825,8 +869,7 @@ def _run_panel_loop(
             abandoned.add(panel.task_key(pick.item.text))
             continue
         if pick.item is None:
-            if pick.skipped:
-                LOGGER.info("本轮不可执行项：%s", ", ".join(pick.skipped))
+            _log_skipped(pick.skipped)
             if abandoned:
                 LOGGER.info("剩余任务都已尝试过 %d 次，无法继续推进，结束", max_attempts)
                 return True
@@ -837,13 +880,47 @@ def _run_panel_loop(
             if safety:
                 LOGGER.error("复查时命中安全验证「%s」，立即停止任务", safety.text)
                 return STOP_SIGNAL
-            pick = panel.pick_task(items, config, exclude=abandoned)
+            pick = panel.pick_task(items, config, exclude=abandoned, tried=tried)
             if pick.item is None:
+                _log_skipped(pick.skipped, prefix="复查后仍无可执行任务")
                 empty_rounds += 1
                 if empty_rounds >= max_empty:
                     LOGGER.info("连续 %d 轮无任务，判定今日任务已处理完", empty_rounds)
                     return True
                 continue
+
+        # 面板一屏只显示几行任务，排在屏外的任务（例如列表下方的「去蚂蚁森林
+        # 收能量」）OCR 根本看不到；不往下翻就永远轮不到它们，整轮反而一直重复
+        # 做屏上那几行做过的。翻一屏继续找，翻到没做过（或还没做满）的就改做它。
+        original, original_items = pick, items
+        for _ in range(_PANEL_SCROLL_DEPTH):
+            if not _task_saturated(pick.item.text, tried):
+                break
+            LOGGER.info("第 %d 轮：本屏都是做过的任务，往下翻一屏找新任务", round_index)
+            _swipe_up(context)
+            items = _scan(context)
+            safety = panel.find_safety(items, config.get("safety_keywords", []))
+            if safety:
+                LOGGER.error("翻页时命中安全验证「%s」，立即停止任务", safety.text)
+                return STOP_SIGNAL
+            candidate = panel.pick_task(items, config, exclude=abandoned, tried=tried)
+            if candidate.item is None:
+                # 这一屏也没有能做的，再翻下去也是同样的结果。
+                break
+            if installed and panel.task_unreachable(candidate.item.text, installed):
+                LOGGER.warning(
+                    "任务「%s」要跳 %s，这台手机上没装这个应用，跳过",
+                    candidate.item.text,
+                    panel.required_package(candidate.item.text),
+                )
+                abandoned.add(panel.task_key(candidate.item.text))
+                continue
+            pick = candidate
+
+        if _task_saturated(pick.item.text, tried):
+            # 翻遍了也没找到新任务：退回原来那一个接着做，
+            # 别让翻页把「唯一还能推进的任务」弄丢。
+            pick, items = original, original_items
 
         name = panel.dedupe_key(pick.item.text)
         button = panel.find_action_button(items, pick.item) or pick.item
@@ -979,7 +1056,7 @@ def _apply_extra_rules(config: dict[str, Any], params: dict[str, Any]) -> None:
     if added:
         LOGGER.info("界面自定义规则已生效：%s", "，".join(added))
     else:
-        LOGGER.info("界面自定义规则：未填写")
+        LOGGER.debug("界面自定义规则：未填写")
 
 
 def register(agent_server: Any) -> None:
@@ -1011,7 +1088,7 @@ def register(agent_server: Any) -> None:
             except (TypeError, ValueError):
                 LOGGER.error("配置项「运行账号」不是整数：%r", raw_user)
                 return False
-            LOGGER.info("按界面配置启动，Android 用户 %d", user_id)
+            LOGGER.debug("按界面配置启动，Android 用户 %d", user_id)
             return start_app(context, config, user_id=user_id)
 
     @agent_server.custom_action("taobao_open_coin_page")

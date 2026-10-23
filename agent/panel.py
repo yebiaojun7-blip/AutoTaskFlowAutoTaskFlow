@@ -48,10 +48,17 @@ PANEL_MARKERS = (
     "逛清单",
     "搜一搜你心仪的宝贝",
     "拍立淘逛感兴趣的宝贝",
+    # 任务列表底部的「换一换」：这个是**列表末尾**的按钮，任务快做完时
+    # 上面那几条汇总文案全被滚出屏幕，它是屏上唯一还留着的面板专属文案。
+    "换一换",
 )
 
 # 面板至少要命中这么多个特征词才算"在面板"。单个弱特征不足以判定。
 PANEL_MIN_HITS = 2
+
+# 靠行结构判定面板时，屏上至少要有这么多条任务行特征（说明文字 + 右侧金币）。
+# 只数一条太松：商品详情页也可能出现一个「+50」。
+PANEL_ROW_MIN_HITS = 2
 
 # 可点击的按钮文案。任务名在上、按钮在下一行，两者左对齐。
 # 实测本机型的面板会混用「浏览5秒」「浏览15秒」「参与答题」「点击去逛」
@@ -632,6 +639,15 @@ def daily_done_visible(items: Iterable[OcrItem]) -> bool:
     return panel_visible(items, DAILY_DONE_MARKERS)
 
 
+def _panel_row_evidence(items: Iterable[OcrItem]) -> int:
+    """数一下屏上有几条「任务行」痕迹：说明文字或右侧金币。"""
+    count = 0
+    for item in items:
+        if is_subtitle(item.text) or _is_reward_badge(item.text):
+            count += 1
+    return count
+
+
 def task_panel_visible(items: Iterable[OcrItem]) -> bool:
     """严格判定当前屏是否真的在淘金币任务面板。
 
@@ -642,11 +658,21 @@ def task_panel_visible(items: Iterable[OcrItem]) -> bool:
     能量面板也要先排除：它和淘金币面板共用「搜一搜你心仪的宝贝」「拍立淘逛
     感兴趣的宝贝」两个任务名，真机上能量面板能命中 PANEL_MARKERS 两条，
     于是被当成了淘金币面板。
+
+    特征词凑不够时按行结构兜底：任务快做完的时候淘宝会换掉一批任务，顶部的
+    「完成下方任务得额外金币」这类汇总文案被滚出屏幕，整屏只剩任务行和底部的
+    「换一换」。此时特征词可能只命中一条，但界面确实就是任务面板 —— 判成
+    「不在面板」会让恢复流程去点面板标题里的「淘金币」，然后一直失败到停任务。
     """
     items = list(items)
     if energy_panel_visible(items):
         return False
-    return panel_visible(items, PANEL_MARKERS, min_hits=PANEL_MIN_HITS)
+    if panel_visible(items, PANEL_MARKERS, min_hits=PANEL_MIN_HITS):
+        return True
+    # 首页底部标签栏是「还在首页」的铁证，有它就不能按行结构认面板。
+    if home_tab_bar_visible(items):
+        return False
+    return _panel_row_evidence(items) >= PANEL_ROW_MIN_HITS
 
 
 def team_page_visible(items: Iterable[OcrItem]) -> bool:
@@ -812,22 +838,28 @@ def pick_task(
     *,
     kinds: Sequence[str] | None = None,
     exclude: Collection[str] = (),
+    tried: Collection[str] = (),
 ) -> PanelPick:
     """挑出一个可执行任务：先挑做到一半的，再按阅读顺序挑。
 
     黑名单、已完成等不可执行项会被记录到 skipped 中，便于日志排查。
     kinds 用于限定只挑选某一类任务（Pipeline 中区分搜索/浏览/跳转分支）。
     exclude 里的任务名会被跳过，用于放弃那些反复执行也不推进的任务。
+    tried 里的任务名表示「这次运行已经做过」，排序时排到没做过的后面。
 
     排序刻意不是纯阅读顺序：面板上排在前面的任务可能永远推不动（例如
     「任务到访得金币」这种没有 (x/y)、点了也不涨的），纯按顺序挑就会一直
     挑中它，把轮次全耗在它身上，而下面那些真正还能推进的任务一次都轮不到。
     做到一半的 (1/3) 已经证明能推进，先做完它更划算。
+
+    tried 还要再往前一层：像「拍立淘(0/5)」这种要做五遍的任务如果一直优先，
+    它上方的行会把轮次吃光，下方一屏之外的「去蚂蚁森林收能量」一轮都轮不到。
+    所以先铺一遍没做过的，再回头做需要多遍的。
     """
     config = config or load_config()
     allowed = tuple(kinds) if kinds else EXECUTABLE_KINDS
     skipped: list[str] = []
-    candidates: list[tuple[int, OcrItem, TaskDecision]] = []
+    candidates: list[tuple[int, int, OcrItem, TaskDecision]] = []
     for item in items:
         # 说明文字（「浏览15秒」「参与答题」「点击去逛」）不是任务，
         # 它就在任务名正下方，且「点击去逛」本身还命中 jump_tasks 名单，
@@ -861,14 +893,16 @@ def pick_task(
             skipped.append(f"{item.text}(右侧无按钮，已完成)")
             continue
         progress = task_progress(item.text)
-        # 0 = 做到一半的优先，1 = 还没开始的，保持 discover 顺序稳定。
+        # 0 = 还没做过的，1 = 本次运行已经做过（可能还要多做几遍）。
+        fresh = 0 if text not in tried else 1
+        # 0 = 做到一半的优先，保持 discover 顺序稳定。
         rank = 0 if progress is not None and progress[0] > 0 else 1
-        candidates.append((rank, item, decision))
+        candidates.append((fresh, rank, item, decision))
 
     if not candidates:
         return PanelPick(TaskDecision("none", reason="当前屏没有可执行任务"), None, tuple(skipped))
-    candidates.sort(key=lambda entry: entry[0])
-    _, item, decision = candidates[0]
+    candidates.sort(key=lambda entry: (entry[0], entry[1]))
+    _, _, item, decision = candidates[0]
     return PanelPick(decision, item, tuple(skipped))
 
 
