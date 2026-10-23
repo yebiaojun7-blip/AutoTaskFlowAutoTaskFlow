@@ -653,6 +653,18 @@ def _recover_to_panel(
             LOGGER.info("今日任务已全部完成，无需回到任务面板")
             return items
 
+        # 已经跳到淘宝以外（支付宝 / 浏览器 / 小程序）。手机端控制器没有 shell，
+        # 问不出前台包名，_ensure_taobao_foreground 那头是瞎的，只能靠屏幕文字判断。
+        # 这种局面上按返回只会退出当前应用，退多少次都回不到淘宝，必须重新拉起。
+        if panel.foreign_app_visible(items):
+            if note("foreign-app") >= 2:
+                LOGGER.warning("连续两次仍在淘宝以外的应用里，放弃继续恢复")
+                return None
+            LOGGER.info("已跳到淘宝以外的应用，重新启动淘宝")
+            start_app(context, config)
+            _sleep(3.0)
+            continue
+
         # 已进了淘金币任务面板但目标是能量面板：这个面板上没有「去赚能量」，
         # 而它里面又有「淘金币趣味课堂」这类含「淘金币」的文字，继续往下走会
         # 把任务行当成首页入口点下去。按返回回到淘金币首页再重找入口。

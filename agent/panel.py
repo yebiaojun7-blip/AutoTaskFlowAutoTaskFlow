@@ -639,6 +639,32 @@ def daily_done_visible(items: Iterable[OcrItem]) -> bool:
     return panel_visible(items, DAILY_DONE_MARKERS)
 
 
+# 已经跳到淘宝以外（支付宝、浏览器、小程序）时才能看到的文字。
+#
+# 手机端跑任务时控制器是 Android 原生控制器，**没有 shell**：问不出前台包名，
+# 也就无法知道「现在最前面的是不是淘宝」。这时唯一的信号就是屏幕上有什么字。
+# 一旦落到这些页面上，按多少次返回都回不到淘宝面板（返回键只会退出当前应用），
+# 只能重新把淘宝拉起来。所以这些词是「必须重启淘宝」的判据，而不是普通干扰页。
+#
+# 只放**支付宝外壳**的固定文案，并且要求命中两条：任务跳过去的小程序页里文案随活动
+# 而变，而「蚂蚁庄园」「蚂蚁森林」「扫一扫」在淘宝自己的任务行和搜索框上就有，
+# 拿它们判定会让正常的面板被当成「跳到别的应用」从而反复重启淘宝。
+FOREIGN_APP_MARKERS = (
+    "收付款",
+    "看股票行情",
+    "记账本",
+    "卡包",
+    "余额宝",
+    "出行",
+)
+FOREIGN_APP_MIN_HITS = 2
+
+
+def foreign_app_visible(items: Iterable[OcrItem]) -> bool:
+    """当前屏是否已经不在淘宝里（跳到了支付宝 / 浏览器 / 小程序）。"""
+    return panel_visible(items, FOREIGN_APP_MARKERS, min_hits=FOREIGN_APP_MIN_HITS)
+
+
 def _panel_row_evidence(items: Iterable[OcrItem]) -> int:
     """数一下屏上有几条「任务行」痕迹：说明文字或右侧金币。"""
     count = 0
