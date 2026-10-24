@@ -1750,6 +1750,34 @@ class ProgressBacktrackTest(unittest.TestCase):
             )
         )
 
+    def test_recorded_sequence_never_gets_abandoned(self) -> None:
+        """重放真机 11:35 那次的读数序列，两个任务都不该被放弃。
+
+        这两串读数是日志里逐轮抄下来的：三个 (x/10) 任务被放弃时，
+        屏上写着的根本不是「没动静」，而是在 0~9 之间来回跳。
+        """
+        sequences = {
+            "好物沉浸看": [(8, 10), (9, 10), (1, 10), (2, 10)],
+            "好物随心逛": [(1, 10), (0, 10), (2, 10), (1, 10)],
+        }
+        for name, readings in sequences.items():
+            tried: dict[str, int] = {}
+            last_progress: dict[str, tuple[int, int]] = {}
+            for index, progress in enumerate(readings, start=1):
+                items = panel.parse_ocr_items(
+                    [text_item(f"{name}({progress[0]}/{progress[1]})", 131, 943, 230, 35)]
+                )
+                tried[name] = tried.get(name, 0) + 1
+                stuck = actions._progress_stuck(
+                    FakeContext([[]]), name, tried, 3, last_progress, seen=items
+                )
+                with self.subTest(task=name, reading=progress):
+                    self.assertFalse(
+                        stuck,
+                        f"{name} 在第 {index} 轮读到 "
+                        f"{progress[0]}/{progress[1]} 就被放弃了",
+                    )
+
 
 class FindProgressRowTest(unittest.TestCase):
     """按名字读进度时不能串到相邻行上。
@@ -2762,6 +2790,41 @@ class NoOpTaskTest(unittest.TestCase):
     def test_no_op_task_is_retried_before_being_abandoned(self) -> None:
         """空点不是任务的错：要重试几次，不能一次就放弃。"""
         self.assertGreaterEqual(actions._MAX_NO_OP_RETRIES, 2)
+
+    def test_jump_that_left_the_panel_leaves_a_trace(self) -> None:
+        """真的跳出去了也要留一行日志。
+
+        没弹确认框、原任务行也不在屏上时，之前三档判定都不命中：既没有
+        「已确认打开」，也没有「没有真正发生」，日志里「执行」之后就是近一分钟
+        的空白。11:35 那次「去淘特赚钱抵20%」连着三轮都是这样，事后完全看不出
+        它到底跳没跳、停在哪。
+        """
+        jump_row = [
+            text_item("赚金币抵钱", 100, 150, 300, 48),
+            text_item("今日累计奖励", 100, 220, 240, 40),
+            text_item("去淘特赚钱抵20%(0/1)", 100, 300),
+            text_item("去完成", 900, 300, 120, 40),
+            # 「去淘特赚钱抵20%」这个名字本身不命中任何名单，类型只写在它下面
+            # 那行说明里，和真机上一样靠副标题兜底成 jump。
+            text_item("点击去逛", 100, 340, 98, 30),
+        ]
+        # 点完之后换成了对方页面：既没有确认框，也没有原任务行。
+        jumped = [text_item("淘特新人专享", 200, 400, 300, 60)]
+        ctx = FakeContext([jumped])
+        pick = panel.pick_task(panel.parse_ocr_items(jump_row), load_config())
+        self.assertIsNotNone(pick.item)
+        self.assertEqual(pick.decision.kind, "jump")
+
+        with self.assertLogs("autotaskflow", level="INFO") as logs:
+            outcome = actions._run_task(
+                ctx, pick, fast_config(), pick.item, panel.parse_ocr_items(jump_row)
+            )
+
+        self.assertEqual(outcome, actions.TASK_OK)
+        self.assertTrue(
+            any("按已跳出处理" in line for line in logs.output),
+            "跳转既没弹框也没留在原面板时，日志里什么都没记",
+        )
 
 
 class FragmentTest(unittest.TestCase):
