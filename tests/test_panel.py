@@ -1702,6 +1702,126 @@ class ProgressTest(unittest.TestCase):
         self.assertEqual(len(context.controller.clicks), 3)
 
 
+class ProgressBacktrackTest(unittest.TestCase):
+    """进度读数倒退，不是「这个任务没进展」。
+
+    真机 11:35 那次「好物沉浸看」已经 9/10，第 7 轮那一行被读成 (1/10)，
+    于是三次额度当场用完，一个只差一格就能做完的浏览任务被放弃了。
+    面板上的进度只会往上走，读小了只能是识别读错了行或漏了位。
+    """
+
+    def setUp(self) -> None:
+        self._original_sleep = actions._sleep
+        actions._sleep = lambda seconds: None
+
+    def tearDown(self) -> None:
+        actions._sleep = self._original_sleep
+
+    def test_backwards_reading_does_not_abandon_the_task(self) -> None:
+        tried = {"好物沉浸看": 2}
+        last_progress = {"好物沉浸看": (9, 10)}
+        items = panel.parse_ocr_items(
+            [
+                text_item("好物沉浸看(1/10)", 131, 943, 230, 35),
+                text_item("去完成", 583, 961, 88, 35),
+            ]
+        )
+        context = FakeContext([[]])
+
+        stuck = actions._progress_stuck(
+            context, "好物沉浸看", tried, 3, last_progress, seen=items
+        )
+
+        self.assertFalse(stuck, "读数从 9/10 变成 1/10 就被判成没进展，任务被误放弃")
+        self.assertEqual(tried["好物沉浸看"], 1, "读数变了应重置尝试次数")
+        self.assertEqual(last_progress["好物沉浸看"], (1, 10), "基线跟着新读数走")
+
+    def test_identical_reading_still_abandons(self) -> None:
+        """真的一动不动时仍要放弃，别把这条修成永远不放弃。"""
+        tried = {"好物沉浸看": 3}
+        last_progress = {"好物沉浸看": (2, 10)}
+        items = panel.parse_ocr_items(
+            [text_item("好物沉浸看(2/10)", 131, 943, 230, 35)]
+        )
+
+        self.assertTrue(
+            actions._progress_stuck(
+                FakeContext([[]]), "好物沉浸看", tried, 3, last_progress, seen=items
+            )
+        )
+
+
+class FindProgressRowTest(unittest.TestCase):
+    """按名字读进度时不能串到相邻行上。
+
+    真机面板上常有名字互为前缀的两行（「每日来任务面板」与它下面的签到行）。
+    只认前 6 个字就会把更靠前那行的 (x/y) 当成目标任务的进度。
+    """
+
+    def test_row_that_merely_starts_with_the_name_is_not_used(self) -> None:
+        items = panel.parse_ocr_items(
+            [
+                text_item("每日来任务面板签到(8/8)", 131, 943, 230, 35),
+                text_item("每日来任务面板(1/2)", 131, 1010, 230, 35),
+            ]
+        )
+
+        progress = actions._find_progress(
+            FakeContext([[]]), "每日来任务面板", seen=items
+        )
+
+        self.assertEqual(progress, (1, 2), "读到了以它开头的另一行")
+
+    def test_exact_match_wins_even_when_shorter_than_the_prefix_window(
+        self,
+    ) -> None:
+        items = panel.parse_ocr_items(
+            [
+                text_item("好物沉浸看直播(9/10)", 131, 943, 230, 35),
+                text_item("好物沉浸看(2/10)", 131, 1010, 230, 35),
+            ]
+        )
+
+        progress = actions._find_progress(
+            FakeContext([[]]), "好物沉浸看", seen=items
+        )
+
+        self.assertEqual(progress, (2, 10))
+
+
+class AbandonedTaskTest(unittest.TestCase):
+    """屏上还有做不完的任务时，不能因为「有一批被放弃的」就直接收尾。"""
+
+    def setUp(self) -> None:
+        self._original_sleep = actions._sleep
+        actions._sleep = lambda seconds: None
+
+    def tearDown(self) -> None:
+        actions._sleep = self._original_sleep
+
+    def test_loop_keeps_going_while_a_doable_task_is_left(self) -> None:
+        # 第一帧：只能做「浏览商品」；之后一直停在 (0/5) 上直到被放弃。
+        # 真机 11:35 那次第 13 轮就撞上「已放弃项非空」直接结束，
+        # 而屏上那些 (x/10) 任务根本没做满。
+        screens = [
+            [
+                text_item("赚金币抵钱", 100, 150, 300, 48),
+                text_item("今日累计奖励", 100, 220, 240, 40),
+                text_item("浏览商品(0/5)", 100, 300),
+                text_item("去完成", 900, 300, 120, 40),
+            ]
+        ]
+        context = FakeContext(screens)
+
+        with self.assertLogs("autotaskflow", level="INFO") as logs:
+            actions.run_daily_loop(context, fast_config(), max_rounds=6)
+
+        self.assertTrue(
+            any("已尝试 2 次仍停在 0/5" in line for line in logs.output),
+            "放弃原因的日志里应带上屏上的读数",
+        )
+
+
 class DwellRequirementTest(unittest.TestCase):
     """停留时长必须够任务自己要求的秒数，否则进度不增长、任务白做一次。"""
 

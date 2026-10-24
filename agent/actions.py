@@ -525,11 +525,24 @@ def _run_task(
                 button.text,
             )
             return TASK_NOTHING
+        else:
+            # 既没弹出确认框、原任务行也不在屏上了：界面确实换了地方，但认不出
+            # 换到了哪。这一档原先什么都不记，日志里「执行」之后就是近一分钟的
+            # 空白 —— 11:35 那次「去淘特赚钱抵20%」连着三轮都这样，事后完全看
+            # 不出它跳没跳、停在哪。至少要留下这一行的判定依据。
+            LOGGER.info(
+                "点「%s」后未出现确认框，任务行也已不在屏上，按已跳出处理",
+                button.text,
+            )
 
     required = panel.required_seconds(items, pick.item)
     total = panel.dwell_seconds(kind, config, required)
     if required > 0:
         LOGGER.info("任务要求停留 %.0f 秒，实际停留 %.0f 秒", required, total)
+    elif kind == "jump":
+        # 跳转任务不写停留秒数，但奖励是在对方页面里待够时间才给。不记这一行，
+        # 日志里「执行」之后就是近一分钟的空白，看不出这段时间到底在干什么。
+        LOGGER.info("跳转到外部页面后停留 %.0f 秒", total)
     # 浏览类和跳转到的会场页都是靠页面在动才累计，停留期间必须持续滑动。
     _dwell(context, total, scroll=kind in ("browse", "jump"))
     _back(context)
@@ -1097,9 +1110,6 @@ def _run_panel_loop(
 
         if pick.item is None:
             _log_skipped(pick.skipped)
-            if abandoned:
-                LOGGER.info("剩余任务都已尝试过 %d 次，无法继续推进，结束", max_attempts)
-                return True
             LOGGER.info("第 %d 轮：当前屏无可执行任务，拖回顶部复查", round_index)
             # 必须拖到顶，不能只挪一小段：没做完的任务在面板最上方，
             # 一次 36% 屏高的微调根本够不到，复查看到的还是同一批。
@@ -1116,6 +1126,12 @@ def _run_panel_loop(
             )
             if pick.item is None:
                 _log_skipped(pick.skipped, prefix="复查后仍无可执行任务")
+                # 「有任务被放弃」不等于「都没得做了」：放弃是按去重键记的，
+                # 而复查后看到的往往是一批新的行。11:35 那次第 13 轮只剩下
+                # 四个已放弃项就直接收尾，可屏幕上那些 (x/10) 任务根本没做满。
+                if abandoned:
+                    LOGGER.info("剩余任务都已尝试过 %d 次，无法继续推进，结束", max_attempts)
+                    return True
                 empty_rounds += 1
                 if empty_rounds >= max_empty:
                     LOGGER.info("连续 %d 轮无任务，判定今日任务已处理完", empty_rounds)
@@ -1210,9 +1226,20 @@ def _run_panel_loop(
             context, name, tried, max_attempts, last_progress, seen=recovered
         ):
             abandoned.add(name)
-            LOGGER.warning(
-                "任务「%s」已尝试 %d 次仍无进展，本次跳过它", name, tried[name]
-            )
+            stuck_at = last_progress.get(name)
+            # 把读数写进日志：只说「没进展」，下一次还得重新翻日志找屏幕上是几比几。
+            if stuck_at is None:
+                LOGGER.warning(
+                    "任务「%s」已尝试 %d 次仍无进展，本次跳过它", name, tried[name]
+                )
+            else:
+                LOGGER.warning(
+                    "任务「%s」已尝试 %d 次仍停在 %d/%d，本次跳过它",
+                    name,
+                    tried[name],
+                    stuck_at[0],
+                    stuck_at[1],
+                )
 
         # 周期进度：一轮要一分多钟，只有失败日志的话看不出其实还在推进。
         if round_index % _PROGRESS_LOG_EVERY == 0:
@@ -1260,12 +1287,31 @@ def _progress_stuck(
     seen 是调用方刚拿到的面板识别结果，给了就不必再截一次图。
     """
     progress = _find_progress(context, name, seen=seen)
-    if progress is not None:
-        previous = last_progress.get(name)
-        last_progress[name] = progress
-        if previous is not None and progress[0] > previous[0]:
-            tried[name] = 1
-            return False
+    if progress is None:
+        return tried.get(name, 0) >= max_attempts
+    previous = last_progress.get(name)
+    last_progress[name] = progress
+    if previous is None:
+        return tried.get(name, 0) >= max_attempts
+    if progress[0] > previous[0]:
+        tried[name] = 1
+        return False
+    if progress[0] < previous[0]:
+        # 读数倒退不是「没进展」。面板上的进度只会往上走，倒退只可能是两次识别
+        # 读到了不同的行、或漏读了一位数字：11:35 那次「好物沉浸看」已经 9/10，
+        # 第 7 轮被读成 1/10，紧接着就按「试了 3 次没进展」把一个只差一格的
+        # 浏览任务放弃了。读数变了就说明这一任务在动，基线跟着挪、次数清零；
+        # 进度真被重置的话，也从新基线继续算，不会漏掉后面的推进。
+        tried[name] = 1
+        LOGGER.info(
+            "任务「%s」的进度从 %d/%d 变成 %d/%d，按新读数重新计算尝试次数",
+            name,
+            previous[0],
+            previous[1],
+            progress[0],
+            progress[1],
+        )
+        return False
     return tried.get(name, 0) >= max_attempts
 
 
@@ -1283,12 +1329,20 @@ def _find_progress(
     seen 不为空时直接用它，省掉一次整屏 OCR。
     """
     key = name[:6]
+    fallback: tuple[int, int] | None = None
     for item in seen if seen is not None else _scan(context):
-        if panel.dedupe_key(item.text).startswith(key):
-            progress = panel.task_progress(item.text)
-            if progress is not None:
-                return progress
-    return None
+        progress = panel.task_progress(item.text)
+        if progress is None:
+            continue
+        text = panel.dedupe_key(item.text)
+        if text == name:
+            return progress
+        # 优先要完全同名的行。前缀匹配只当备选：任务名可能被 OCR 和后一行并成
+        # 一条，但也可能真的存在一个更长的同名任务（「好物沉浸看直播」之于
+        # 「好物沉浸看」），只认前缀就会把更靠前那行的进度当成它的进度。
+        if fallback is None and key and text.startswith(key):
+            fallback = progress
+    return fallback
 
 
 def _random_delay(config: dict[str, Any]) -> float:
