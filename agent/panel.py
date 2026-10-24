@@ -259,6 +259,36 @@ def task_finished(text: str) -> bool:
     return progress is not None and progress[1] > 0 and progress[0] >= progress[1]
 
 
+# 任务名短于这个长度就只可能是 OCR 碎片，不是任务。
+# 真机日志里出现过被截断成「看」「好物」「0」的行：它们既匹配不到任何名单、
+# 也没法按名字去重，被挑中就是空停留一轮，还把同一批任务的轮次吃掉。
+_MIN_TASK_NAME_LEN = 3
+
+
+def is_task_fragment(text: str) -> bool:
+    """这行文字短得像 OCR 碎片，不可能是任务名。
+
+    只用于在挑选阶段静静跳过，不写进「本轮不可执行项」日志——那里正是
+    为了不让这些碎片把日志冲成看不懂的一大段。
+    """
+    return len(dedupe_key(text)) < _MIN_TASK_NAME_LEN
+
+
+def same_task_still_visible(items: Iterable[OcrItem], task_text: str) -> bool:
+    """点击后同一行任务是不是还完整地留在屏上（= 刚才那一下是空点）。
+
+    用于验证跳转类任务到底有没有真的跳出去。只看「还在不在」，不看坐标：
+    面板会因为顶部汇总行被滚出屏幕而整体上移，同一任务的坐标每轮都在变。
+
+    用去重键比较，进度后缀不同也算同一个任务：「去节省卡领红包(0/1)」
+    没做成时仍然是 (0/1)，做成了才会变 (1/1)。
+    """
+    wanted = dedupe_key(task_text)
+    if not wanted:
+        return False
+    return any(dedupe_key(item.text) == wanted for item in items)
+
+
 # 右侧金币按钮的起点要比任务名右边缘再往右这么多，才算「本行的按钮」。
 # 真机上面板宽 720，任务名右边缘最宽到 501，金币从 600 起，留 20 的余量即可；
 # 而顶部「+180 额外得」那个汇总金币在 y=325，靠上面的纵向距离把它排除。
@@ -924,6 +954,7 @@ def pick_task(
     kinds: Sequence[str] | None = None,
     exclude: Collection[str] = (),
     tried: Collection[str] = (),
+    deprioritize: Collection[str] = (),
 ) -> PanelPick:
     """挑出一个可执行任务：先挑做到一半的，再按阅读顺序挑。
 
@@ -931,6 +962,8 @@ def pick_task(
     kinds 用于限定只挑选某一类任务（Pipeline 中区分搜索/浏览/跳转分支）。
     exclude 里的任务名会被跳过，用于放弃那些反复执行也不推进的任务。
     tried 里的任务名表示「这次运行已经做过」，排序时排到没做过的后面。
+    deprioritize 里的任务是「点了但页面没反应」，不算做不了、也不该放弃，
+    但要排到最后：否则它每轮都被挑中，把其他能做的任务全挡住了。
 
     排序刻意不是纯阅读顺序：面板上排在前面的任务可能永远推不动（例如
     「任务到访得金币」这种没有 (x/y)、点了也不涨的），纯按顺序挑就会一直
@@ -944,7 +977,7 @@ def pick_task(
     config = config or load_config()
     allowed = tuple(kinds) if kinds else EXECUTABLE_KINDS
     skipped: list[str] = []
-    candidates: list[tuple[int, int, OcrItem, TaskDecision]] = []
+    candidates: list[tuple[int, int, int, OcrItem, TaskDecision]] = []
     for item in items:
         # 说明文字（「浏览15秒」「参与答题」「点击去逛」）不是任务，
         # 它就在任务名正下方，且「点击去逛」本身还命中 jump_tasks 名单，
@@ -954,6 +987,9 @@ def pick_task(
         # 说明文字也可能写成「任务名 + 奖励」（「逛一逛蚂蚁庄园+800」），
         # 它带不了进度、却和上面的任务共用同一个「去完成」，会被当成另一个任务。
         if repeats_task_above(items, item):
+            continue
+        # 碎片行静静跳过：它们不是任务，也不该占日志位置。
+        if is_task_fragment(item.text):
             continue
         text = dedupe_key(item.text)
         if text in exclude:
@@ -988,12 +1024,15 @@ def pick_task(
         fresh = 0 if text not in tried else 1
         # 0 = 做到一半的优先，保持 discover 顺序稳定。
         rank = 0 if progress is not None and progress[0] > 0 else 1
-        candidates.append((fresh, rank, item, decision))
+        # 空点过的排最后：它可能只是这一下没点中，过一会儿还能做，
+        # 但不该每轮都抢先，把其他确实能推进的任务挡在后面。
+        deferred = 1 if text in deprioritize else 0
+        candidates.append((deferred, fresh, rank, item, decision))
 
     if not candidates:
         return PanelPick(TaskDecision("none", reason="当前屏没有可执行任务"), None, tuple(skipped))
-    candidates.sort(key=lambda entry: (entry[0], entry[1]))
-    _, _, item, decision = candidates[0]
+    candidates.sort(key=lambda entry: (entry[0], entry[1], entry[2]))
+    _, _, _, item, decision = candidates[0]
     return PanelPick(decision, item, tuple(skipped))
 
 

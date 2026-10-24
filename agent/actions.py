@@ -24,8 +24,35 @@ LOGGER = logging.getLogger("autotaskflow")
 #   topResumedActivity=ActivityRecord{263017643 u999 com.taobao.taobao/...}
 _FOREGROUND_RE = re.compile(r"topResumedActivity=ActivityRecord\{[^}]*?\s((?:[a-zA-Z0-9_]+\.)+[a-zA-Z0-9_]+)/")
 
-# 单次运行最多处理多少个任务，防止页面异常时无限循环。
-DEFAULT_MAX_ROUNDS = 20
+# 单次运行的**安全兜底**轮数，不是「该做多少个任务」的目标值。
+#
+# 主循环真正该停的判据只有一条：面板上已经没有可执行任务了（黑名单、做满
+# (x/y)、右侧没有按钮的行都不算可执行）。曾经把这里当目标值用（20），于是
+# 双11能量面板上三个 (x/10) 任务加十来个跨应用任务做不完就报「任务完成」——
+# 明明只推进了七格。任务量由面板决定，不由这个数字决定。
+#
+# 留这个上限只是为了不在页面异常时无限打转（例如某个任务点了不涨进度、
+# 又永远不被计入放弃）。真跑满它说明判据出了新问题，日志会明确写出来。
+DEFAULT_MAX_ROUNDS = 120
+
+# 连续多少次「回不到目标面板」才放弃整个任务。
+# 恢复到同一张面板要重开淘宝、等首页渲染、再点入口，偶发一次失败很常见；
+# 一次失败就 StopTask 会把已经做了十几分钟的任务整轮作废（真机 09:35 那次
+# 只做了 8 轮就中止，而屏上还有一多半任务）。
+_MAX_LOST_STREAK = 3
+
+# 任务名短于这个长度就只可能是 OCR 碎片（「看」「好物」「0」），不是任务。
+# 这些碎片既匹配不到任何名单、也没法按名字去重，被挑中就是空耗一轮停留。
+_MIN_TASK_NAME_LEN = 3
+
+# 每多少轮打一条进度日志。一轮要一分多钟，没有周期日志时日志里全是失败
+# 重试，看不出「其实还在往前推进」。
+_PROGRESS_LOG_EVERY = 5
+
+# 同一个任务「点了但页面没反应」最多重试几次。空点通常是浮层挡住了按钮，
+# 或这一行刚被重建；重试几次就能中。但按钮彻底失效时要有封顶。
+_MAX_NO_OP_RETRIES = 3
+
 # 主动安全停止的返回标记：让 Pipeline 走 on_error → StopTask。
 STOP_SIGNAL = False
 
@@ -422,20 +449,32 @@ def _run_quiz(context: Any, *, tries: int = 3) -> bool:
     return True
 
 
+# 一次任务执行的结果。必须区分「做失败」与「根本没发生」：
+#   OK      —— 流程走完，进度应该涨了
+#   FAILED  —— 进去了但没做成（搜索框没找到、答案没提交），该计一次失败
+#   NOTHING —— 连页面都没动（跳转空点、确认框没点到确认），这不是这个任务
+#              的错，不能计入「试了几次没进展」，否则一个本来能做的任务会被
+#              三次空点提前放弃。
+TASK_OK = "ok"
+TASK_FAILED = "failed"
+TASK_NOTHING = "nothing"
+
+
 def _run_task(
     context: Any,
     pick: panel.PanelPick,
     config: dict[str, Any],
     button: panel.OcrItem,
     items: list[panel.OcrItem],
-) -> bool:
+) -> str:
     """点击任务按钮并按任务类型等待，然后返回任务面板。
 
     items 是面板上已识别出来的内容，用来读任务自己写明的停留要求，
     避免为了这个再截一次图。
 
-    返回这次任务是否真的做成了。搜索类没提交成搜索时返回 False：
-    页面没搜过，进度不会涨，当成成功会让主循环反复重跑同一个任务。
+    返回 TASK_OK / TASK_FAILED / TASK_NOTHING（语义见上面常量注释）。
+    搜索类没提交成搜索时返回 TASK_FAILED：页面没搜过，进度不会涨，
+    当成成功会让主循环反复重跑同一个任务。
     """
     kind = pick.decision.kind
     _click_item(context, button, delay=1.5)
@@ -443,20 +482,49 @@ def _run_task(
     if kind == "search":
         keyword = pick.decision.search_keyword or panel.search_keyword(config)
         required = panel.required_seconds(items, pick.item)
-        return _run_search(context, keyword, config, required=required)
+        done = _run_search(context, keyword, config, required=required)
+        return TASK_OK if done else TASK_FAILED
 
     # 答题任务点进去是单选题，必须选答案、点提交才有奖励；
     # 当成浏览任务停留只会空等，进度一动不动。
     if kind == "quiz":
-        return _run_quiz(context)
+        return TASK_OK if _run_quiz(context) else TASK_FAILED
 
     # 跳转类任务（蚂蚁庄园 / 蚂蚁森林 / 跳闲鱼 / 站外页）点下去会弹确认框，
     # 要真的点确认进去做，不能取消：取消就是放弃任务。
     # 这个框盖在面板上方且面板文字仍能被识别，不处理就会永远卡在这里。
     if kind == "jump":
         popped = _scan(context)
-        if panel.open_app_dialog_visible(popped) and _open_app_dialog_action(context, popped) is not None:
+        if not panel.open_app_dialog_visible(popped) and panel.same_task_still_visible(
+            popped, pick.item.text
+        ):
+            # 只截一帧就判空点会误伤：弹框和小程序首屏有时要两三秒才出来，
+            # 正好扫在过渡帧上就会把一次成功的跳转判成空点、白白多跑一轮。
+            # 所以再等两眼，等它要么弹出确认框、要么任务行已经不在屏上。
+            popped = _wait_for(
+                lambda current: panel.open_app_dialog_visible(current)
+                or not panel.same_task_still_visible(current, pick.item.text),
+                context,
+                tries=3,
+                delay=1.5,
+            )
+        if panel.open_app_dialog_visible(popped):
+            if _open_app_dialog_action(context, popped) is None:
+                # 弹框在、但没点到确认按钮：再停留只会停在弹框上白等。
+                LOGGER.warning("确认框上没找到确认按钮，这次跳转不算完成")
+                _back(context)
+                return TASK_FAILED
             LOGGER.info("已确认打开外部小程序，进去做任务「%s」", pick.item.text)
+        elif panel.same_task_still_visible(popped, pick.item.text):
+            # 压根没出弹框，任务行却原封不动。真机上这一下常常是空点（按钮上
+            # 还有别的浮层、或这一行刚被重建），然后停留十几秒、返回、计入一轮 ——
+            # 10:20 那次第 10/11/12 轮就是这样白跑了三分多钟。
+            # 空点不算失败：任务本身没毛病，只是这一下没点中，重试同一行即可。
+            LOGGER.warning(
+                "点「%s」后任务仍在屏上，这次跳转没有真正发生，不计入完成",
+                button.text,
+            )
+            return TASK_NOTHING
 
     required = panel.required_seconds(items, pick.item)
     total = panel.dwell_seconds(kind, config, required)
@@ -465,7 +533,7 @@ def _run_task(
     # 浏览类和跳转到的会场页都是靠页面在动才累计，停留期间必须持续滑动。
     _dwell(context, total, scroll=kind in ("browse", "jump"))
     _back(context)
-    return True
+    return TASK_OK
 
 
 def _scan(context: Any, node: str = "PanelFullOcr") -> list[panel.OcrItem]:
@@ -638,6 +706,14 @@ def _recover_to_panel(
         LOGGER.info("已重新打开淘宝，继续找%s", profile.name)
 
     home_tries = 0
+    # 已经点空过的入口坐标。首页那排图标会被 OCR 合并成一整块，按字符占比
+    # 折算出的点可能一直落在空白处 —— 真机 21:46 那次三次都点在 (636,194)，
+    # 三次空点把一次本来能救回来的进入拖成了「无法进入面板」。所以同一个
+    # 坐标只点一次：没反应就换手段（滑一下版式 → 重开淘宝 → 交出恢复），
+    # 而不是把同一个动作重做三遍。
+    failed_points: set[tuple[int, int]] = set()
+    # 入口入口试尽后的升级档位，只升不降：滑一下 → 重开淘宝 → 放弃本次恢复。
+    entry_escalation = 0
     # 上一次恢复动作的签名与它的重复次数。同一个动作重复出现说明它**没有改变
     # 界面**：一遍又一遍地重做同一件事，每次中间隔着一整轮全屏 OCR（真机 20 秒
     # 量级），能把一次失败放大成两三分钟的原地打转。重复到第二次就换更硬的手段。
@@ -713,18 +789,30 @@ def _recover_to_panel(
 
         if panel.coin_home_visible(items):
             entry = panel.find_text_by_keywords(items, profile.home_entry)
+            if entry is not None and entry.center not in failed_points:
+                LOGGER.info("在淘金币首页，点击「%s」打开%s", entry.text, profile.name)
+                failed_points.add(entry.center)
+                _click_item(context, entry, delay=2.0)
+                continue
             if entry is not None:
-                if note("home-entry") >= 2:
-                    # 点了「赚金币」仍然停在首页，说明这一下没打开面板
-                    # （入口被浮层挡住、或点在了文字的空白处）。再点一次还是
-                    # 同样的结果，改成重开淘宝让页面回到干净状态。
-                    LOGGER.info("连续点「%s」仍未进入%s，重新启动淘宝", entry.text, profile.name)
+                # 这个位置刚点过、没打开面板。重做同一个动作只会又一次停在首页，
+                # 所以改成重开淘宝让页面回到干净状态；仍不行就退出淘金币，
+                # 回到淘宝首页从入口那一排重新走一遍。
+                entry_escalation += 1
+                if entry_escalation == 1:
+                    LOGGER.info("点「%s」没打开%s，重新启动淘宝", entry.text, profile.name)
                     start_app(context, config)
                     _sleep(3.0)
-                    repeats = 0
-                    continue
-                LOGGER.info("在淘金币首页，点击「%s」打开%s", entry.text, profile.name)
-                _click_item(context, entry, delay=2.0)
+                elif entry_escalation == 2:
+                    LOGGER.info(
+                        "重开淘宝后「%s」仍打不开%s，退出淘金币重走入口",
+                        entry.text,
+                        profile.name,
+                    )
+                    _back(context)
+                else:
+                    LOGGER.info("淘金币首页入口怎么点都进不去%s，交给下一轮恢复", profile.name)
+                    break
                 continue
 
         # 已经翻进了某一层内页（标题带返回箭头）。内页正文里同样有「淘金币」，
@@ -744,22 +832,30 @@ def _recover_to_panel(
             clicked = False
             for keyword in panel.COIN_ENTRY_KEYWORDS:
                 point = panel.keyword_center(entry, keyword)
-                if point is not None:
-                    if note("home-icon") >= 2:
-                        # 同上一处：连续两次点同一个图标都没进淘金币，
-                        # 说明这一下是空点，继续点只是在同一个界面上打转。
-                        LOGGER.info("连续点首页「%s」仍未进入淘金币，重新启动淘宝", keyword)
-                        start_app(context, config)
-                        _sleep(3.0)
-                        repeats = 0
-                        clicked = True
-                        break
-                    LOGGER.info("在淘宝首页点击「%s」进入淘金币 (%d, %d)", keyword, *point)
-                    _click(context, point[0], point[1], delay=3.0)
-                    clicked = True
-                    break
+                if point is None or point in failed_points:
+                    continue
+                LOGGER.info("在淘宝首页点击「%s」进入淘金币 (%d, %d)", keyword, *point)
+                failed_points.add(point)
+                _click(context, point[0], point[1], delay=3.0)
+                clicked = True
+                break
             if clicked:
                 continue
+            # 能折算出来的入口位置全点过了、都没进淘金币。同一排图标重复点
+            # 只会得到同一个结果，所以逐级改手段：先滑一下让版式变（合并块
+            # 会被拆开、坐标随之改变），再不行重开淘宝，最后交出本次恢复。
+            entry_escalation += 1
+            if entry_escalation == 1:
+                LOGGER.info("首页「淘金币」入口点了没反应，滑动换版式再找")
+                _scroll_once(context, upward=True)
+            elif entry_escalation == 2:
+                LOGGER.info("首页「淘金币」入口反复点不开，重新启动淘宝")
+                start_app(context, config)
+                _sleep(3.0)
+            else:
+                LOGGER.info("首页「淘金币」入口怎么点都进不去，交给下一轮恢复")
+                break
+            continue
 
         if panel.home_tab_bar_visible(items):
             # 首页上按返回等于退出淘宝，越退越回不到入口。先把信息流滚回顶部
@@ -895,18 +991,23 @@ def _run_panel_loop(
     """主循环：扫描 → 安全词检测 → 挑一个任务 → 执行 → 回来 → 重复。
 
     返回值语义：
-        True  —— 正常结束（没有可执行任务了，或达到轮次上限）
-        False —— 主动安全停止（命中安全验证），调用方应终止任务
+        True  —— 正常结束（面板上已经没有可执行任务了）
+        False —— 主动安全停止（命中安全验证 / 连续多次回不到目标面板）
     """
     max_empty = int(config.get("timing", {}).get("max_empty_rounds", 3))
     max_attempts = int(config.get("timing", {}).get("max_attempts_per_task", 2))
     empty_rounds = 0
     completed = 0
+    # 连续多少次没回到面板。单次恢复失败很常见（重启淘宝后首页还没渲染完、
+    # 跳外部应用后回不来），一次就判死会把十几分钟的任务整轮作废。
+    lost_streak = 0
     # 同一个任务该执行几次就够。淘宝的任务面板会把没做完的任务一直摆在原位，
     # 若每次扫描都挑中同一个（例如「点击去逛+30」），停留再久也不会推进，
     # 就会把轮次全部耗在它身上。这里按任务名记执行次数，超过上限就放弃。
     tried: dict[str, int] = {}
     abandoned: set[str] = set()
+    # 每个任务「点了但页面没反应」的次数。空点不是任务的错，但也不能无限重试。
+    no_ops: dict[str, int] = {}
     # 每个任务上一次看到的 (x/y) 进度。判断「有没有推进」必须跟上一轮比，
     # 只看 progress[0] > 0 会把所有带进度的任务当成永不放弃。
     last_progress: dict[str, tuple[int, int]] = {}
@@ -946,8 +1047,25 @@ def _run_panel_loop(
         if not profile.visible(items):
             LOGGER.info("第 %d 轮：不在%s，尝试恢复", round_index, profile.name)
             if _recover_to_panel(context, config, profile=profile) is None:
-                LOGGER.error("无法回到%s，停止任务", profile.name)
-                return STOP_SIGNAL
+                lost_streak += 1
+                # 一次恢复失败不能终止整个任务：真机 09:35 那次只做了 8 轮就被
+                # 判「回不到面板」中止，而屏上还有一多半任务没做。只有连续多次
+                # 彻底回不去（每次都重启了淘宝仍然无效）才当作真失败。
+                if lost_streak >= _MAX_LOST_STREAK:
+                    LOGGER.error(
+                        "连续 %d 次无法回到%s，停止任务", lost_streak, profile.name
+                    )
+                    return STOP_SIGNAL
+                LOGGER.warning(
+                    "第 %d 轮：没能回到%s（连续 %d 次），先等页面稳定再试",
+                    round_index,
+                    profile.name,
+                    lost_streak,
+                )
+                pregained = None
+                _sleep(3.0)
+            else:
+                lost_streak = 0
             # 成功找回面板不算空轮次：否则 max_empty_rounds=1 时
             # 刚恢复就被判定为"今日任务已完成"，直接结束整轮任务。
             continue
@@ -964,7 +1082,9 @@ def _run_panel_loop(
                 LOGGER.info("面板上已无可执行任务，今日任务已全部完成")
             return True
 
-        pick = panel.pick_task(items, config, exclude=abandoned, tried=tried)
+        pick = panel.pick_task(
+            items, config, exclude=abandoned, tried=tried, deprioritize=no_ops
+        )
         if pick.item is not None and installed and panel.task_unreachable(pick.item.text, installed):
             package = panel.required_package(pick.item.text)
             LOGGER.warning(
@@ -974,6 +1094,7 @@ def _run_panel_loop(
             )
             abandoned.add(panel.task_key(pick.item.text))
             continue
+
         if pick.item is None:
             _log_skipped(pick.skipped)
             if abandoned:
@@ -990,7 +1111,9 @@ def _run_panel_loop(
             if safety:
                 LOGGER.error("复查时命中安全验证「%s」，立即停止任务", safety.text)
                 return STOP_SIGNAL
-            pick = panel.pick_task(items, config, exclude=abandoned, tried=tried)
+            pick = panel.pick_task(
+                items, config, exclude=abandoned, tried=tried, deprioritize=no_ops
+            )
             if pick.item is None:
                 _log_skipped(pick.skipped, prefix="复查后仍无可执行任务")
                 empty_rounds += 1
@@ -1014,7 +1137,9 @@ def _run_panel_loop(
             if safety:
                 LOGGER.error("翻页时命中安全验证「%s」，立即停止任务", safety.text)
                 return STOP_SIGNAL
-            candidate = panel.pick_task(items, config, exclude=abandoned, tried=tried)
+            candidate = panel.pick_task(
+                items, config, exclude=abandoned, tried=tried, deprioritize=no_ops
+            )
             if candidate.item is None:
                 # 这一屏也没有能做的，再翻下去也是同样的结果。
                 break
@@ -1047,13 +1172,32 @@ def _run_panel_loop(
             pick.decision.kind,
             button.text,
         )
-        ok = _run_task(context, pick, config, button, items)
-        if ok:
+        outcome = _run_task(context, pick, config, button, items)
+        if outcome == TASK_OK:
             completed += 1
-        else:
+            no_ops.pop(name, None)
+        elif outcome == TASK_FAILED:
             # 搜索没提交成功：页面根本没搜过，算完成只会让主循环不停地重跑同一个任务。
             LOGGER.warning("任务「%s」未能真正执行，不计入完成", pick.item.text)
         empty_rounds = 0
+
+        if outcome == TASK_NOTHING:
+            # 页面根本没动：这不是这个任务做不了，只是这一下没点中。
+            # 既不算完成、也不计入「试了几次没进展」——否则一个本来能做的
+            # 任务会被三次空点提前放弃。但仍然要有封顶，不然按钮彻底失效的
+            # 那一行会在面板上无限重试。
+            no_ops[name] = no_ops.get(name, 0) + 1
+            if no_ops[name] >= _MAX_NO_OP_RETRIES:
+                abandoned.add(name)
+                LOGGER.warning(
+                    "任务「%s」连点 %d 次都没反应，本次跳过它",
+                    pick.item.text,
+                    no_ops[name],
+                )
+            # 界面没变，上一轮的识别结果仍然有效，不必再扫一遍。
+            pregained = None
+            _sleep(_random_delay(config))
+            continue
 
         recovered = _recover_to_panel(context, config, profile=profile)
         if recovered is None:
@@ -1070,11 +1214,28 @@ def _run_panel_loop(
                 "任务「%s」已尝试 %d 次仍无进展，本次跳过它", name, tried[name]
             )
 
+        # 周期进度：一轮要一分多钟，只有失败日志的话看不出其实还在推进。
+        if round_index % _PROGRESS_LOG_EVERY == 0:
+            LOGGER.info(
+                "已完成 %d 个任务（第 %d 轮），已放弃 %d 个做不动的任务",
+                completed,
+                round_index,
+                len(abandoned),
+            )
+
         # 到下一轮开始之间只有等待，界面不会再变，这份识别结果仍然有效。
+        # recovered 为 None 时不能沿用上一轮的图：那一存现在很可能已经不在面板上了。
         pregained = recovered
         _sleep(_random_delay(config))
 
-    LOGGER.info("达到轮次上限 %d，已执行 %d 个任务", max_rounds, completed)
+    # 走到这里说明「面板上一直有任务可做」这个假设没被打破，却把兜底轮数跑满了。
+    # 这不是「任务做完了」，必须让日志能分清：否则下次又会把安全兜底当成目标值看。
+    LOGGER.warning(
+        "已跑满兜底轮数 %d（完成 %d 个任务）。任务仍可继续，"
+        "请检查是否有任务反复点击但不推进进度",
+        max_rounds,
+        completed,
+    )
     return True
 
 

@@ -1800,12 +1800,13 @@ class OffsiteAppTest(unittest.TestCase):
             text_item("去完成", 900, 300, 120, 40),
         ]
         # packages 传的是整机清单（含支付宝），而不是分身账号的 15 个包。
-        context = FakeContext([screen], packages=self.PHONE)
+        # 跳转任务点下去会弹「打开支付宝」确认框，确认进去做完再按返回。
+        context = FakeContext([screen, PANEL_WITH_DIALOG, DONE_ONLY], packages=self.PHONE)
         actions.run_daily_loop(context, fast_config(), max_rounds=2)
 
-        # 任务真的被点下去做了（点「去完成」，做完按返回）。
-        self.assertTrue(context.controller.clicks)
-        self.assertEqual(set(context.controller.clicks), {(960, 320)})
+        # 任务真的被点下去做了（点「去完成」，确认弹框，做完按返回）。
+        self.assertIn((960, 320), context.controller.clicks)
+        self.assertIn((578, 985), context.controller.clicks)
         self.assertIn(4, context.controller.keys)
 
     def test_task_needing_missing_app_is_skipped_without_clicking(self) -> None:
@@ -2266,7 +2267,7 @@ class EnergyLoopTest(unittest.TestCase):
     """能量面板主循环：做任务、跳过做不了的、自己收尾退出。"""
 
     def test_loop_runs_one_task_and_stops_by_itself(self) -> None:
-        screens = [ENERGY_PANEL, ENERGY_PANEL, ENERGY_SETTLED, ENERGY_SETTLED]
+        screens = [ENERGY_PANEL, ENERGY_PANEL, PANEL_WITH_DIALOG, ENERGY_SETTLED, ENERGY_SETTLED]
         context = FakeContext(screens)
 
         result = actions.run_energy_loop(context, fast_config(), max_rounds=5)
@@ -2274,7 +2275,8 @@ class EnergyLoopTest(unittest.TestCase):
         self.assertTrue(result)
         # 「逛一逛蚂蚁庄园(0/1)」右侧「去完成」(583,569,90,36) 的中心。
         self.assertIn((628, 587), context.controller.clicks)
-        # 做完按返回回面板。
+        # 跳转任务确认了弹框，做完按返回回面板。
+        self.assertIn((578, 985), context.controller.clicks)
         self.assertIn(4, context.controller.keys)
 
     def test_loop_never_clicks_undoable_rows(self) -> None:
@@ -2540,6 +2542,142 @@ class QuietLogTest(unittest.TestCase):
 
         self.assertTrue(all("未填写" in line for line in logs.output))
         self.assertFalse(any(line.startswith("INFO") for line in logs.output))
+
+
+class StopConditionTest(unittest.TestCase):
+    """什么时候该停：不是「跑满多少轮」，而是「屏上再没有能做的任务」。
+
+    真机 10:20 那次跑了 21 分钟，好物沉浸看只到 7/10 就被 `达到轮次上限 20`
+    截断，日志里那三个 (x/10) 任务明明还能接着做。轮数是兜底，不是目标。
+    """
+
+    # 一屏永远有活干：任务行照抄真机布局，进度停在 7/10（做不满、也不会被判「已领取」）。
+    ENDLESS = [
+        text_item("今日速赚570淘金币", 28, 188, 377, 47),
+        text_item("为你找到最简单的任务，2分钟即可完成", 32, 240, 400, 24),
+        text_item("好物沉浸看(7/10)", 131, 943, 230, 35),
+        text_item("去完成", 583, 961, 88, 35),
+        text_item("浏览15秒", 131, 983, 196, 28),
+    ]
+
+    def setUp(self) -> None:
+        self._original_sleep = actions._sleep
+        actions._sleep = lambda seconds: None
+
+    def tearDown(self) -> None:
+        actions._sleep = self._original_sleep
+
+        # 放弃阈值放宽，让「任务一直做不完」这件事成为唯一还在推进的原因；
+        # 否则测的就变成「无进展就放弃」，跟轮数无关了。
+    def slow_config(self) -> dict:
+        config = fast_config()
+        config["timing"]["max_attempts_per_task"] = 60
+        return config
+
+    def test_loop_is_not_cut_off_by_the_round_cap(self) -> None:
+        """屏上一直有能做的任务时，要一直做下去，不因轮数停下。
+
+        这里给 30 轮的额度，让循环有机会跑过 20 轮：
+        只要它在 20 轮就停，就说明「轮数」又被当成了终止条件。
+        """
+        screens = [self.ENDLESS] * 40
+        context = FakeContext(screens)
+
+        with self.assertLogs("autotaskflow", level="INFO") as logs:
+            actions.run_daily_loop(context, self.slow_config(), max_rounds=30)
+
+        rounds = [line for line in logs.output if "轮：执行" in line]
+        self.assertGreater(len(rounds), 20, "循环在 20 轮就停了，轮数仍在当终止条件")
+        # 停下来是因为跑满了兜底轮数，而不是被当成「做完了」。
+        self.assertTrue(any("兜底轮数" in line for line in logs.output))
+
+    def test_default_round_cap_is_only_a_safety_net(self) -> None:
+        """默认轮数要足够大：一轮约一分钟，面板上的 (x/10) 任务要几十轮。"""
+        self.assertGreaterEqual(actions.DEFAULT_MAX_ROUNDS, 100)
+
+    def test_one_lost_recovery_does_not_abort_the_whole_run(self) -> None:
+        """回不到面板一次就 StopTask，会把已经做好的进度整轮作废。"""
+        # 第一帧是面板，之后落进支付宝首页回不来，最后回到面板把任务做完。
+        screens = [PANEL_ROW, DEVICE_HOME, DEVICE_HOME, PANEL_ROW, DONE_ONLY]
+        context = FakeContext(screens)
+
+        with self.assertLogs("autotaskflow", level="INFO") as logs:
+            actions.run_daily_loop(context, fast_config(), max_rounds=4)
+
+        self.assertFalse(
+            any("停止任务" in line for line in logs.output),
+            "一次恢复失败就停了整轮任务",
+        )
+
+
+class NoOpTaskTest(unittest.TestCase):
+    """点了但页面没反应的跳转任务，不能算做成，也不能把任务放弃掉。"""
+
+    def setUp(self) -> None:
+        self._original_sleep = actions._sleep
+        actions._sleep = lambda seconds: None
+
+    def tearDown(self) -> None:
+        actions._sleep = self._original_sleep
+
+    def test_jump_that_never_happens_is_not_counted_as_done(self) -> None:
+        """点了「去逛逛」却停在原面板：没有弹框、任务行还在，就是空点。"""
+        jump_row = [
+            text_item("赚金币抵钱", 100, 150, 300, 48),
+            text_item("今日累计奖励", 100, 220, 240, 40),
+            text_item("去蚂蚁庄园逛逛哟(0/1)", 100, 300),
+            text_item("去逛逛", 900, 300, 120, 40),
+        ]
+        ctx = FakeContext([jump_row])
+        pick = panel.pick_task(panel.parse_ocr_items(jump_row), load_config())
+
+        with self.assertLogs("autotaskflow", level="WARNING") as logs:
+            outcome = actions._run_task(
+                ctx, pick, fast_config(), pick.item, panel.parse_ocr_items(jump_row)
+            )
+
+        self.assertEqual(outcome, actions.TASK_NOTHING)
+        self.assertTrue(any("没有真正发生" in line for line in logs.output))
+
+    def test_no_op_task_is_retried_before_being_abandoned(self) -> None:
+        """空点不是任务的错：要重试几次，不能一次就放弃。"""
+        self.assertGreaterEqual(actions._MAX_NO_OP_RETRIES, 2)
+
+
+class FragmentTest(unittest.TestCase):
+    """OCR 碎片（「看」「好物」「0」）不是任务，不能挑出来执行。"""
+
+    def test_fragment_is_recognised(self) -> None:
+        self.assertTrue(panel.is_task_fragment("看"))
+        self.assertTrue(panel.is_task_fragment("好物"))
+        self.assertTrue(panel.is_task_fragment("0"))
+        self.assertFalse(panel.is_task_fragment("逛清单，每15秒30金币(0/2)"))
+
+    def test_pick_task_skips_fragments(self) -> None:
+        items = panel.parse_ocr_items(
+            [
+                text_item("今日速赚570淘金币", 28, 188, 377, 47),
+                text_item("看", 130, 447, 40, 33),
+                text_item("好物沉浸看(7/10)", 131, 943, 230, 35),
+                text_item("+400", 583, 961, 88, 35),
+            ]
+        )
+
+        pick = panel.pick_task(items, load_config())
+
+        self.assertIsNotNone(pick.item)
+        self.assertEqual(pick.item.text, "好物沉浸看(7/10)")
+
+    def test_same_task_still_visible_matches_exactly(self) -> None:
+        items = panel.parse_ocr_items(
+            [
+                text_item("去蚂蚁庄园逛逛哟(0/1)", 100, 300),
+                text_item("去逛逛", 900, 300, 120, 40),
+            ]
+        )
+
+        self.assertTrue(panel.same_task_still_visible(items, "去蚂蚁庄园逛逛哟(0/1)"))
+        self.assertFalse(panel.same_task_still_visible(items, "去芭芭农场逛一逛"))
 
 
 if __name__ == "__main__":
