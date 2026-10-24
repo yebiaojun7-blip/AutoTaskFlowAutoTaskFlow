@@ -2411,6 +2411,66 @@ class EnergyRecoverTest(unittest.TestCase):
         self.assertTrue(any("无法进入双11赚能量面板" in line for line in logs.output))
 
 
+class EnergyEntryRenderTest(unittest.TestCase):
+    """点完「去赚能量」后，页面有几秒是过渡态，不能扫一眼就当没进去。"""
+
+    # 真机 15:02:17 那帧：上半屏已经是能量面板的内容，下半屏还是赛车首页的
+    # 残留（「车库」「去赚金币」仍在首页原位）。两边判定都不成立。
+    TRANSITION = [
+        text_item("搜索商品得能量", 497, 96, 176, 41),
+        text_item("浏览商品15s得", 500, 222, 104, 18),
+        text_item("浏览15s赚", 572, 551, 72, 22),
+        text_item("车库", 452, 153, 22, 15),
+        text_item("去", 452, 385, 18, 17),
+    ]
+
+    def setUp(self) -> None:
+        self._original_sleep = actions._sleep
+        actions._sleep = lambda seconds: None
+
+    def tearDown(self) -> None:
+        actions._sleep = self._original_sleep
+
+    def test_transition_frame_does_not_end_the_recovery(self) -> None:
+        """过渡帧出现时继续等，别把它当成「已经不在首页」而按返回。"""
+        screens = [COIN_HOME, self.TRANSITION, ENERGY_PANEL]
+        context = FakeContext(screens)
+
+        self.assertTrue(actions.open_energy_page(context, fast_config()))
+        # 关键：恢复过程中没有按返回 —— 按了就是把自己刚打开的面板关掉。
+        self.assertNotIn(4, context.controller.keys)
+
+    def test_entry_is_not_reclicked_after_layout_shift(self) -> None:
+        """同一个入口在版式挪动 60 像素后，不能当成新入口再点一遍。
+
+        赛车首页会整体上下移（实测同一个「去赚能量」在 y=383 和 y=443 都出现过），
+        按坐标记「点过了」会失效 —— 版式一变坐标就变，防重点那道闸门形同不存在，
+        于是对着同一个入口反复点。这里两帧用同一个入口文字、只挪坐标来复现。
+        """
+        first = [
+            text_item("车库", 452, 153, 25, 15),
+            text_item("升级赛车拿钱", 573, 349, 139, 37),
+            text_item("去赚金币", 452, 383, 57, 19),
+            text_item("去赚能量", 773, 383, 57, 19),
+        ]
+        shifted = [
+            text_item("车库", 452, 213, 26, 14),
+            text_item("升级赛车拿钱", 573, 410, 136, 32),
+            text_item("去赚金币", 452, 443, 57, 18),
+            text_item("去赚能量", 773, 443, 57, 18),
+        ]
+        screens = [first] + [shifted] * 8
+        context = FakeContext(screens)
+
+        actions.open_energy_page(context, fast_config())
+
+        # 「去赚能量」两帧坐标不同（(801,392) 与 (801,452)），但它是同一个入口，
+        # 只能点一次；第二次起要走「换个手段」，而不是再点一遍。
+        entry_clicks = [c for c in context.controller.clicks if c in ((801, 392), (801, 452))]
+        self.assertEqual(entry_clicks, [(801, 392)])
+
+
+
 class EnergyLoopTest(unittest.TestCase):
     """能量面板主循环：做任务、跳过做不了的、自己收尾退出。"""
 

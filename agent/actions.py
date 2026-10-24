@@ -40,7 +40,6 @@ DEFAULT_MAX_ROUNDS = 120
 # 一次失败就 StopTask 会把已经做了十几分钟的任务整轮作废（真机 09:35 那次
 # 只做了 8 轮就中止，而屏上还有一多半任务）。
 _MAX_LOST_STREAK = 3
-
 # 任务名短于这个长度就只可能是 OCR 碎片（「看」「好物」「0」），不是任务。
 # 这些碎片既匹配不到任何名单、也没法按名字去重，被挑中就是空耗一轮停留。
 _MIN_TASK_NAME_LEN = 3
@@ -64,6 +63,12 @@ _SKIPPED_LOG_LIMIT = 4
 # 面板一屏大约 6 行、整个列表十来行，翻 3 屏足够到底；不设上限会在到底之后
 # 反复滑动，把轮次全耗在滑动手势上。
 _PANEL_SCROLL_DEPTH = 3
+
+# 点完首页入口后，等目标面板真正渲染出来的重试次数。
+# 这个界面在虚拟屏上只有 2 FPS（日志里的「游戏画面帧率仅 2 FPS」），页面切换
+# 要持续好几秒。点完立刻判一次，截到的是「上半屏已是面板、下半屏还是首页」的
+# 过渡态，两边判定都不成立，于是误判成没进去而按了返回，把刚打开的面板关掉。
+_ENTRY_RENDER_TRIES = 3
 
 
 class PanelProfile(NamedTuple):
@@ -725,6 +730,10 @@ def _recover_to_panel(
     # 坐标只点一次：没反应就换手段（滑一下版式 → 重开淘宝 → 交出恢复），
     # 而不是把同一个动作重做三遍。
     failed_points: set[tuple[int, int]] = set()
+    # 已经点过的入口文字。按文字而不是按坐标记，是因为赛车首页的版式会整体
+    # 上下移 60 像素（同一个「去赚能量」实测出现在 y=383 和 y=443 两种位置），
+    # 按坐标记会把同一个入口的第二次尝试当成全新入口，于是又点一遍同一个位置。
+    failed_entries: set[str] = set()
     # 入口入口试尽后的升级档位，只升不降：滑一下 → 重开淘宝 → 放弃本次恢复。
     entry_escalation = 0
     # 上一次恢复动作的签名与它的重复次数。同一个动作重复出现说明它**没有改变
@@ -802,13 +811,34 @@ def _recover_to_panel(
 
         if panel.coin_home_visible(items):
             entry = panel.find_text_by_keywords(items, profile.home_entry)
-            if entry is not None and entry.center not in failed_points:
+            key = panel.normalize_text(entry.text) if entry is not None else ""
+            if entry is not None and key not in failed_entries:
                 LOGGER.info("在淘金币首页，点击「%s」打开%s", entry.text, profile.name)
+                failed_entries.add(key)
                 failed_points.add(entry.center)
                 _click_item(context, entry, delay=2.0)
+                # 点完入口不能立刻扫一眼就下结论：这个界面在虚拟屏上只有 2 FPS，
+                # 页面切换要持续好几秒，点击后 2 秒截到的那一帧是「上半屏已经是
+                # 能量面板、下半屏还是赛车首页」的过渡态，两边的判定都不成立，
+                # 于是落到内层页分支按了返回 —— 刚打开的面板被自己关掉。
+                # 真机 15:02 那次就是这样一轮轮空转，最后报「无法进入面板」。
+                # 这里必须给面板留出渲染时间，再判一次。
+                appeared = _wait_for(
+                    lambda current: profile.visible(current)
+                    or (profile.daily_done and panel.daily_done_visible(current)),
+                    context,
+                    tries=_ENTRY_RENDER_TRIES,
+                    delay=1.5,
+                )
+                if profile.visible(appeared):
+                    LOGGER.info("已进入%s", profile.name)
+                    return appeared
+                if profile.daily_done and panel.daily_done_visible(appeared):
+                    LOGGER.info("今日任务已全部完成，无需再进%s", profile.name)
+                    return appeared
                 continue
             if entry is not None:
-                # 这个位置刚点过、没打开面板。重做同一个动作只会又一次停在首页，
+                # 这个入口刚点过、没打开面板。重做同一个动作只会又一次停在首页，
                 # 所以改成重开淘宝让页面回到干净状态；仍不行就退出淘金币，
                 # 回到淘宝首页从入口那一排重新走一遍。
                 entry_escalation += 1
