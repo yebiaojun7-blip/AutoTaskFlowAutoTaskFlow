@@ -2470,6 +2470,220 @@ class EnergyEntryRenderTest(unittest.TestCase):
         self.assertEqual(entry_clicks, [(801, 392)])
 
 
+# 真机失败帧（2026-10-26 10:11:01.444，一加 Ace 3 / 淘宝）：点首页「淘金币」之后
+# 打开的**不是**淘金币首页，而是这张「今日速赚830淘金币」完成提示页。18 块原样抄自日志。
+#
+# 关键点：标题「今日速赚830淘金币」带「淘金币」三个字、长度只有 10、也没有返回箭头，
+# 于是同时躲过了 nav_title 和句子特征，被 coin_entry_point 当成首页那排图标的入口。
+# 按字符占比折算出的位置是 (636,195)，和当天日志里那次点击一模一样 —— 点的是标题文字。
+COIN_PROMO_PAGE = [
+    text_item("市", 449, 128, 20, 20),
+    text_item("今日速赚830淘金币", 453, 182, 216, 27),
+    text_item("为你找到最简单的任务，3分钟即可完成", 454, 210, 227, 13),
+    text_item("78739>", 465, 127, 73, 22),
+    text_item("山", 473, 558, 7, 8),
+    text_item("继续浏览精选清单", 498, 553, 131, 18),
+    text_item("工位零食补给>", 512, 661, 84, 14),
+    text_item("38+9", 516, 585, 36, 13),
+    text_item("中老年蛋白粉", 516, 595, 72, 15),
+    text_item("JHTT", 520, 612, 20, 6),
+    text_item("今日快速赚奖励已拿完", 532, 411, 217, 23),
+    text_item("记得明天再来", 600, 442, 81, 18),
+    text_item("阅读学习角落", 620, 661, 85, 15),
+    text_item("贴心平价护", 730, 660, 67, 16),
+    text_item("福", 741, 647, 12, 12),
+    text_item("长器适自N日对行", 742, 586, 54, 14),
+    text_item("", 766, 186, 19, 17),
+    text_item("X", 806, 186, 20, 19),
+]
+
+
+class CoinPromoPageTest(unittest.TestCase):
+    """「今日速赚…淘金币」提示页的标题不能被当成首页入口。
+
+    真机 2026-10-26 10:11 那次：点「淘金币」打开的是这张提示页，标题被认成入口，
+    恢复流程对着标题文字点了三次、重启一次淘宝，最后报「进不去双11赚能量面板」。
+    用户看到的现象是「第一步完成了，进不去第二步」。
+    """
+
+    def setUp(self) -> None:
+        self._original_sleep = actions._sleep
+        actions._sleep = lambda seconds: None
+
+    def tearDown(self) -> None:
+        actions._sleep = self._original_sleep
+
+    def test_promo_title_is_not_a_home_entry(self) -> None:
+        items = panel.parse_ocr_items(COIN_PROMO_PAGE)
+        self.assertIsNone(
+            panel.coin_entry_point(items),
+            "提示页标题「今日速赚830淘金币」被当成首页那排图标的入口",
+        )
+
+    def test_keyword_center_would_have_landed_on_the_title(self) -> None:
+        """记录成因：按字符占比折算出的 (636,195) 正是标题里那三个字。"""
+        items = panel.parse_ocr_items(COIN_PROMO_PAGE)
+        title = panel.find_text_by_keywords(items, ("今日速赚830淘金币",))
+        assert title is not None
+        self.assertEqual(panel.keyword_center(title, "淘金币"), (636, 195))
+
+    def test_real_home_entry_still_works(self) -> None:
+        """修完不能把真入口一起挡掉。"""
+        items = panel.parse_ocr_items(
+            [text_item("领淘金币", 24, 320, 102, 29), text_item("搜索", 593, 168, 73, 44)]
+        )
+        self.assertIsNotNone(panel.coin_entry_point(items))
+
+    def test_promo_page_is_recognised_as_daily_done(self) -> None:
+        items = panel.parse_ocr_items(COIN_PROMO_PAGE)
+        self.assertTrue(panel.daily_done_visible(items))
+
+    def test_close_button_is_found(self) -> None:
+        items = panel.parse_ocr_items(COIN_PROMO_PAGE)
+        close = panel.popup_close_button(items)
+        assert close is not None
+        self.assertEqual(close.center, (816, 195))
+
+    def test_close_button_is_not_a_sentence_fragment(self) -> None:
+        """标题里带 X 的商品名不能被当成关闭按钮。"""
+        items = panel.parse_ocr_items([text_item("X-LAB洗面奶", 500, 600, 120, 20)])
+        self.assertIsNone(panel.popup_close_button(items))
+
+    def test_energy_recovery_closes_the_promo_page(self) -> None:
+        """能量任务碰到这层提示页时，要把它收起来再去点「赚能量」。
+
+        旧逻辑在这里判不出入口（标题被当成入口），连点三次后放弃，
+        整个「双11赚能量」以「进不去面板」告终。
+        """
+        context = FakeContext([COIN_PROMO_PAGE, COIN_HOME, ENERGY_PANEL])
+
+        self.assertTrue(actions.open_energy_page(context, fast_config()))
+
+        # 点的是关闭按钮 (816,195)，然后才是「赚能量」入口 (655,668)。
+        self.assertIn((816, 195), context.controller.clicks)
+        self.assertIn((655, 668), context.controller.clicks)
+        # 点标题里那三个字的位置 (636,195) 一次都不许出现。
+        self.assertNotIn((636, 195), context.controller.clicks)
+
+    def test_coin_task_treats_the_promo_page_as_done(self) -> None:
+        """淘金币任务碰到同一屏是「今日已做完」，正常结束，不是失败。"""
+        context = FakeContext([COIN_PROMO_PAGE])
+
+        with self.assertLogs("autotaskflow", level="INFO") as logs:
+            result = actions.open_coin_page(context, fast_config())
+
+        self.assertTrue(result)
+        self.assertEqual(context.controller.clicks, [])
+        self.assertIn("今日任务已完成", "\n".join(logs.output))
+
+
+
+# 真机 2026-10-26 09:51:30 那一帧商品详情页的完整 OCR 结果（49 块，逐块照抄）。
+# 顶部的「任意下单最高另得500淘金币」就是被误当成首页入口的那一行。
+PRODUCT_PAGE = [
+    text_item("官方立减71元 正品保证", 444, 111, 141, 17),
+    text_item("旗舰店Razer雷蛇宝可梦恶作", 446, 91, 178, 13),
+    text_item("旗舰店这手感真舒服啊~兔儿", 446, 675, 179, 17),
+    text_item("七天退换", 446, 697, 55, 19),
+    text_item("旗舰店Razer雷蛇那伽梵蛇V3", 448, 385, 181, 13),
+    text_item("官方立减265元 正品保证", 448, 407, 148, 13),
+    text_item("¥340.48", 450, 144, 74, 22),
+    text_item("¥1486.51", 450, 438, 76, 22),
+    text_item("疾刃", 452, 480, 48, 26),
+    text_item("=", 468, 227, 12, 5),
+    text_item("微蚀刻玻璃鼠标垫", 482, 633, 115, 18),
+    text_item("OPI调节拔", 485, 325, 28, 9),
+    text_item("全游适配火力全开", 496, 202, 89, 13),
+    text_item("生宗量/有凉品", 528, 653, 33, 10),
+    text_item("中", 548, 446, 13, 10),
+    text_item("中", 549, 154, 12, 11),
+    text_item("Tu'ce", 554, 484, 36, 20),
+    text_item("第四代国专光临", 556, 222, 41, 13),
+    text_item("S", 560, 59, 30, 11),
+    text_item("双色注塑工艺按", 560, 272, 48, 13),
+    text_item("RGB幻彩灯", 564, 322, 38, 14),
+    text_item("金币已抵", 573, 431, 60, 19),
+    text_item("¥29.37", 574, 153, 43, 19),
+    text_item("金币已抵", 576, 138, 57, 20),
+    text_item("¥12.34", 576, 448, 37, 15),
+    text_item("浏览15秒可领30", 642, 9, 182, 24),
+    text_item("旗舰店ROG月刃2ACE三模无", 642, 382, 183, 17),
+    text_item("旗舰店 百亿补贴ROG龙鳞ACE", 642, 675, 186, 17),
+    text_item("正品保证七天退换", 642, 698, 115, 18),
+    text_item("机械有线鼠标USB办公电竞游", 644, 91, 181, 13),
+    text_item("官方立减2.9元 正品保证", 644, 112, 145, 17),
+    text_item("正品保证，公益宝见，七天退换", 644, 406, 172, 13),
+    text_item("任意下单最高另得500淘金币", 645, 33, 155, 13),
+    text_item("2|天猫双1", 646, 480, 87, 15),
+    text_item("424", 646, 637, 39, 26),
+    text_item("¥13.32", 648, 144, 57, 24),
+    text_item("¥558.44", 650, 439, 70, 18),
+    text_item("瞬时触发，1亿次按键寿命", 677, 352, 123, 13),
+    text_item("ROG龙鳞 ACE", 684, 506, 109, 18),
+    text_item("ROG光微动", 700, 333, 76, 15),
+    text_item("2k6/天三1rem", 700, 525, 101, 5),
+    text_item("95", 716, 647, 113, 17),
+    text_item("A", 722, 549, 15, 12),
+    text_item("10.1422:00 > .322:59", 745, 479, 85, 13),
+    text_item("金国联保苏计出15", 749, 631, 80, 13),
+    text_item("金币已抵", 773, 138, 57, 20),
+    text_item("金币已抵", 773, 431, 59, 20),
+    text_item("¥1.57", 774, 156, 31, 14),
+    text_item("¥57.86", 774, 448, 39, 15),
+]
+
+
+class ProductPageEntryTest(unittest.TestCase):
+    """商品详情页上的营销文案不能被当成淘宝首页的淘金币入口。
+
+    真机 2026-10-26 09:51 那次：商品页顶部有一行「任意下单最高另得500淘金币」，
+    14 个字、没有标点、也不带价目词，前面几道过滤全放行。恢复流程把它当成首页
+    入口，按字符占比折算出的 (783,39) 正好落在「淘金币」三个字上 —— 点下去页面
+    纹丝不动，于是滑一下、重开淘宝、再连点，同一张商品页被连扫 8 次，
+    光 OCR 就白花了 296 秒。这和「今日速赚」提示页是同一类 bug。
+    """
+
+    def setUp(self) -> None:
+        self._original_sleep = actions._sleep
+        actions._sleep = lambda seconds: None
+
+    def tearDown(self) -> None:
+        actions._sleep = self._original_sleep
+
+    def test_product_copy_is_not_a_home_entry(self) -> None:
+        items = panel.parse_ocr_items(PRODUCT_PAGE)
+        self.assertIsNone(
+            panel.coin_entry_point(items),
+            "商品页文案「任意下单最高另得500淘金币」被当成首页入口",
+        )
+
+    def test_keyword_center_would_have_landed_on_the_copy(self) -> None:
+        """记录成因：按字符占比折算出的 (783,39) 正是文案里那三个字。"""
+        items = panel.parse_ocr_items(PRODUCT_PAGE)
+        copy = panel.find_text_by_keywords(items, ("任意下单最高另得500淘金币",))
+        assert copy is not None
+        self.assertEqual(panel.keyword_center(copy, "淘金币"), (783, 39))
+
+    def test_merged_home_icon_row_still_works(self) -> None:
+        """修完不能把真入口一起挡掉：首页那排图标常被合并成一整块。"""
+        items = panel.parse_ocr_items(
+            [text_item("领淘金币充值中心试用领取常买超市", 24, 320, 380, 29)]
+        )
+        entry = panel.coin_entry_point(items)
+        assert entry is not None
+        self.assertEqual(panel.keyword_center(entry, "淘金币"), (83, 334))
+
+    def test_energy_recovery_leaves_the_product_page_with_back(self) -> None:
+        """碰到商品页要按返回退出，不能再对着文案点。"""
+        context = FakeContext([PRODUCT_PAGE, COIN_HOME, ENERGY_PANEL])
+
+        self.assertTrue(actions.open_energy_page(context, fast_config()))
+
+        self.assertNotIn((783, 39), context.controller.clicks)
+        # 按过返回，而且一次就退出了（没有滑版式、没有重启淘宝）。
+        self.assertTrue(context.controller.keys)
+        self.assertEqual(context.controller.started, [])
+
 
 class EnergyLoopTest(unittest.TestCase):
     """能量面板主循环：做任务、跳过做不了的、自己收尾退出。"""

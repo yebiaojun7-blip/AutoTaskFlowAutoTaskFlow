@@ -773,6 +773,27 @@ def _recover_to_panel(
             LOGGER.info("今日任务已全部完成，无需回到任务面板")
             return items
 
+        # 「今日速赚…淘金币」完成提示页（真机 2026-10-26 10:11 那帧）盖在淘金币
+        # 首页上方。它上面没有任何任务入口，标题里却带「淘金币」，不先处理它就会
+        # 被当成首页那排图标的入口：按字符占比折算出的点正好落在标题文字上
+        # （(636,195) 就是「今日速赚830淘金币」里那三个字的位置），点下去页面
+        # 纹丝不动，于是连点三次、重启一次，最后报「进不去面板」。
+        #
+        # 对淘金币任务它是「今日已完成」的证据（上面那条已经接走了）；对能量任务
+        # 它只是挡路：能量面板在淘金币首页的「赚能量」入口后面，必须先把这层收起来。
+        if panel.daily_done_visible(items):
+            if note("promo-close") >= 3:
+                LOGGER.warning("「今日速赚」提示页收不起来，放弃本次恢复")
+                return None
+            close = panel.popup_close_button(items)
+            if close is None:
+                LOGGER.warning("「今日速赚」提示页上没找到关闭按钮，按返回收起")
+                _back(context)
+            else:
+                LOGGER.info("收起「今日速赚」提示页，回到淘金币首页继续找入口")
+                _click_item(context, close, delay=2.0)
+            continue
+
         # 已经跳到淘宝以外（支付宝 / 浏览器 / 小程序）。手机端控制器没有 shell，
         # 问不出前台包名，_ensure_taobao_foreground 那头是瞎的，只能靠屏幕文字判断。
         # 这种局面上按返回只会退出当前应用，退多少次都回不到淘宝，必须重新拉起。

@@ -688,6 +688,21 @@ def daily_done_visible(items: Iterable[OcrItem]) -> bool:
     return panel_visible(items, DAILY_DONE_MARKERS)
 
 
+# 完成提示页右上角的关闭按钮。OCR 把它读成单独一个符号（真机 10:26 那帧是
+# 「X @(806,186,20,19)」），所以只能按「整块就是关闭符号」来认，用包含匹配会
+# 命中标题里带 X 的商品名。
+CLOSE_BUTTON_TEXTS = ("X", "×", "✕", "╳")
+
+
+def popup_close_button(items: Iterable[OcrItem]) -> OcrItem | None:
+    """找提示页 / 弹层右上角的关闭按钮，没有则返回 None。"""
+    wanted = {normalize_text(text).upper() for text in CLOSE_BUTTON_TEXTS}
+    for item in items:
+        if normalize_text(item.text).upper() in wanted:
+            return item
+    return None
+
+
 # 已经跳到淘宝以外（支付宝、浏览器、小程序）时才能看到的文字。
 #
 # 手机端跑任务时控制器是 Android 原生控制器，**没有 shell**：问不出前台包名，
@@ -916,6 +931,30 @@ _SENTENCE_WORDS = (
 # 首页图标标签拼在一起也就二十来个字，超过这个长度只能是段落文字。
 _ENTRY_MAX_LEN = 24
 
+# 活动标题里的固定词。「今日速赚830淘金币」这类标题同时带数字和这些词，
+# 而首页那排图标（「领淘金币」「芭芭农场」）一个都不带。
+_ENTRY_TITLE_WORDS = ("速赚", "奖励已拿完", "记得明天再来", "找到最简单")
+
+# 商品页 / 会场页的营销文案。真机 09:51 那一帧的商品页顶上就有一行
+# 「任意下单最高另得500淘金币」：14 个字、没有标点、也不带价目词，前面三道
+# 检查全放行，于是商品页被当成淘宝首页 —— 按字符占比折算出的点 (783,39)
+# 正好落在「淘金币」三个字上，连点四次页面纹丝不动，每次都要先付一次
+# 35 秒的全屏 OCR。首页那排图标（「领淘金币充值中心试用领取常买超市」）
+# 一个都不带下面这些词。
+_ENTRY_COPY_WORDS = (
+    "另得",
+    "可得",
+    "可领",
+    "下单",
+    "最高",
+    "立减",
+    "正品",
+    "退换",
+    "补贴",
+    "包邮",
+    "浏览",
+)
+
 
 def _looks_like_sentence(text: str) -> bool:
     """这个文字块像不像一页正文，而不是一排图标里的短标签。"""
@@ -923,7 +962,11 @@ def _looks_like_sentence(text: str) -> bool:
         return True
     if any(mark in text for mark in _SENTENCE_MARKS):
         return True
-    return any(word in text for word in _SENTENCE_WORDS)
+    if any(word in text for word in _SENTENCE_WORDS):
+        return True
+    if any(word in text for word in _ENTRY_COPY_WORDS):
+        return True
+    return any(word in text for word in _ENTRY_TITLE_WORDS)
 
 
 def keyword_center(item: OcrItem, keyword: str) -> tuple[int, int] | None:
