@@ -600,6 +600,10 @@ ENERGY_PANEL_MARKERS = (
     "做任务赚能量",
     "当前进度",
     "任务奖励",
+    # 「能量值兑权益」是同一活动里的另一个页签，顶部仍留着「做任务赚能量」。
+    # 那一屏没有任务行，只命中标题一条特征词，于是既算不上能量面板、
+    # 又被当成淘金币首页（标题含「赚能量」），恢复流程去点标题就卡死了。
+    "能量值兑权益",
     # 面板可以整屏下滑，头部那三行会滚出屏幕，只剩固定的标题和任务行。
     # 下面这些是只在能量面板出现的任务名，用来覆盖下滑后的状态。
     "每拉1人最高得",
@@ -611,6 +615,10 @@ ENERGY_PANEL_MARKERS = (
 
 # 单个特征词不足以说明是能量面板（「任务奖励」在别的活动页也可能出现）。
 ENERGY_PANEL_MIN_HITS = 2
+
+# 能量面板的抬头。它既是面板标题，也是「能量值兑权益」页签上的返回按钮，
+# 因此不能作为「当前在淘金币首页」的证据 —— 淘金币首页没有这几个字。
+ENERGY_PANEL_TITLE = "做任务赚能量"
 
 # 淘金币首页上打开能量面板的入口，与「去赚金币」并排。
 ENERGY_HOME_ENTRY = ("去赚能量", "赚能量")
@@ -781,11 +789,18 @@ def coin_home_visible(items: Iterable[OcrItem]) -> bool:
     能量面板的标题「做任务赚能量」里也含「赚能量」，会被 COIN_HOME_MARKERS
     错认成首页，于是「点赚金币开面板」的动作打在面板标题上，页面纹丝不动。
     所以先排除能量面板。
+
+    光排除还不够：能量面板滑到只剩抬头、或停在「能量值兑权益」页签上那一屏，
+    特征词凑不满两条、算不上能量面板，可抬头里的「赚能量」又稳稳命中首页特征，
+    于是它同时被当成「不是面板」和「是首页」，恢复流程去点自己的抬头，
+    一路空转到停任务（真机 2026-10-26 14:41:57 那帧只有「做任务赚能量」
+    和「能量值兑权益」两块字）。抬头本身就是面板的一部分，不能当首页入口的证据。
     """
     items = list(items)
     if energy_panel_visible(items):
         return False
-    return panel_visible(items, COIN_HOME_MARKERS)
+    home_items = [item for item in items if ENERGY_PANEL_TITLE not in item.text]
+    return panel_visible(home_items, COIN_HOME_MARKERS)
 
 
 def quiz_page_visible(items: Iterable[OcrItem]) -> bool:

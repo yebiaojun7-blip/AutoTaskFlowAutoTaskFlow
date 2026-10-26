@@ -2171,6 +2171,66 @@ ENERGY_PANEL = [
     text_item("浏览5秒+400", 131, 1508, 185, 28),
 ]
 
+# 真机失败帧（2026-10-26 14:41:57，一加 Ace 3 / 淘宝）：能量面板切到
+# 「能量值兑权益」页签后的样子。这一屏没有任务行，顶部的「当前进度」「任务奖励」
+# 也不在，只剩抬头「做任务赚能量」，因此凑不满两条特征词 —— 与此同时抬头里的
+# 「赚能量」又命中首页特征，于是它被当成淘金币首页，恢复流程去点自己的抬头，
+# 页面纹丝不动，一路空转到停任务。坐标原样抄自该帧的 PanelFullOcr 结果。
+ENERGY_REDEEM_TAB = [
+    text_item("田订阅", 774, 10, 54, 24),
+    text_item("签到领钱", 490, 11, 98, 30),
+    text_item("目攻略", 710, 11, 51, 20),
+    text_item("支现金", 485, 71, 56, 28),
+    text_item("支现金", 737, 80, 55, 32),
+    text_item("支现金", 616, 86, 49, 23),
+    text_item("?元", 500, 101, 32, 23),
+    text_item("最高1元", 736, 109, 58, 26),
+    text_item("最高1元", 609, 111, 59, 24),
+    text_item("签到", 497, 144, 33, 20),
+    text_item("逛大促会场", 733, 153, 65, 15),
+    text_item("淘金币狂享20亿", 596, 154, 97, 15),
+    text_item("天天签到领钱每7天额外得红包", 457, 197, 211, 18),
+    text_item("已连续0天", 762, 201, 60, 14),
+    text_item("支现金", 465, 227, 45, 19),
+    text_item("支现金", 537, 227, 44, 20),
+    text_item("支现金", 608, 227, 44, 20),
+    text_item("支现金", 676, 227, 45, 19),
+    text_item("额外红包", 764, 230, 56, 18),
+    text_item("?元", 681, 242, 35, 26),
+    text_item("?元", 544, 243, 32, 25),
+    text_item("?元", 474, 244, 30, 23),
+    text_item("?元", 613, 244, 31, 23),
+    text_item("¥", 781, 251, 24, 22),
+    text_item("领取", 472, 271, 33, 20),
+    text_item("连签7天", 768, 271, 48, 18),
+    text_item("第2天", 542, 272, 34, 16),
+    text_item("第3天", 612, 272, 34, 16),
+    text_item("第4天", 681, 272, 35, 16),
+    text_item("能量值兑权益", 568, 313, 142, 31),
+    text_item("兑换记录>", 770, 336, 62, 18),
+    text_item("做任务赚能量", 580, 366, 116, 19),
+    text_item("能量值165", 608, 386, 65, 19),
+    text_item("我的红包", 465, 389, 56, 18),
+    text_item("任务已完成", 762, 391, 66, 15),
+    text_item("继续逛逛", 768, 407, 56, 15),
+    text_item("开福袋", 712, 431, 54, 24),
+    text_item("兑红包", 458, 432, 52, 20),
+    text_item("更多权益兑换>", 604, 434, 85, 14),
+    text_item("浏览15秒", 768, 467, 53, 14),
+    text_item("2元大促无门槛红包", 461, 480, 123, 26),
+    text_item("得奖励", 776, 483, 40, 14),
+    text_item("抢光了", 606, 488, 50, 18),
+    text_item("开福袋", 744, 502, 45, 19),
+    text_item("限返利商品7天内可用", 462, 504, 119, 17),
+    text_item("需200能量值", 600, 510, 69, 15),
+    text_item("66能量开1次", 733, 529, 68, 14),
+    text_item("浏览商品得最高能量值+15", 450, 579, 215, 19),
+    text_item("BLUE×超级立减", 693, 619, 87, 14),
+    text_item("天猫", 458, 624, 34, 20),
+    text_item("国际", 654, 626, 27, 15),
+    text_item("实力改善安全稳定", 676, 639, 121, 18),
+]
+
 # 同一面板下滑后的样子：顶部那三行（任务奖励 / 当前进度 / 0/50）已经滚出屏幕，
 # 只剩固定的标题和任务行，后面跟着做不了的几类任务（拉人、天猫积分、小游戏、快手）。
 ENERGY_PANEL_SCROLLED = [
@@ -2229,6 +2289,30 @@ class EnergyPanelTest(unittest.TestCase):
         """两个面板共用「搜一搜你心仪的宝贝」「拍立淘逛感兴趣的宝贝」两条任务名。"""
         items = panel.parse_ocr_items(ENERGY_PANEL)
         self.assertFalse(panel.task_panel_visible(items))
+        self.assertFalse(panel.coin_home_visible(items))
+
+    def test_redeem_tab_is_the_energy_panel_not_the_coin_home(self) -> None:
+        """「能量值兑权益」页签上只剩抬头，仍属于能量面板，不是淘金币首页。
+
+        真机 14:41:57 那帧：抬头「做任务赚能量」里的「赚能量」命中首页特征，
+        而这一屏凑不满两条面板特征词，于是恢复流程去点自己的抬头，空转到停任务。
+        """
+        items = panel.parse_ocr_items(ENERGY_REDEEM_TAB)
+        self.assertTrue(panel.energy_panel_visible(items))
+        self.assertFalse(panel.coin_home_visible(items))
+
+    def test_lone_energy_title_is_not_the_coin_home(self) -> None:
+        """抬头单独出现时也不能反证「在淘金币首页」。
+
+        首页没有「做任务赚能量」这几个字，把它从首页证据里摘掉，才能让
+        「只剩抬头」的那一屏落进内页分支按返回，而不是点自己。
+        """
+        items = panel.parse_ocr_items(
+            [
+                text_item("做任务赚能量", 580, 366, 116, 19),
+                text_item("能量值兑权益", 568, 313, 142, 31),
+            ]
+        )
         self.assertFalse(panel.coin_home_visible(items))
 
     def test_coin_panel_is_not_the_energy_panel(self) -> None:
