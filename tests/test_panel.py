@@ -2633,6 +2633,37 @@ PRODUCT_PAGE = [
 ]
 
 
+# 真机 2026-10-26 11:41:55 那一帧「金币超级爆款」商品流页的完整 OCR 结果（24 块，
+# 逐块照抄）。点「去赚能量」之后落到的就是这一页，它顶部的「官方|专享|淘金币」
+# 是三枚并排角标被 OCR 连成一块，曾被误当成淘宝首页的淘金币入口。
+PRODUCT_FEED = [
+    text_item("你加购的都能抵扣", 453, 195, 240, 32),
+    text_item("官方|专享|淘金币", 453, 239, 107, 17),
+    text_item("金币超级爆款", 486, 152, 118, 22),
+    text_item("双官方加抵ROG龙鳞2ACE无线鼠标无", 582, 279, 255, 20),
+    text_item("官方加抵旗舰店仲景六味地黄丸280丸补", 584, 701, 253, 17),
+    text_item("双11 官方加抵", 585, 422, 83, 14),
+    text_item("超级爆款先用后付已售50万+", 585, 439, 181, 13),
+    text_item("官方加抵", 585, 563, 51, 15),
+    text_item("先用后付", 585, 579, 56, 15),
+    text_item("近期抵扣变多，更便宜了！", 598, 297, 152, 18),
+    text_item("旗舰店车虫适用一", 633, 558, 117, 20),
+    text_item("已售9万+", 636, 579, 64, 15),
+    text_item("爆卖9万+件", 648, 656, 72, 19),
+    text_item("爆卖50万+件", 652, 518, 76, 15),
+    text_item("【蔡徐坤同款】eiio水光面", 668, 420, 165, 18),
+    text_item("已售800+件", 676, 374, 73, 21),
+    text_item("-加", 745, 562, 17, 12),
+    text_item("已抵", 764, 358, 24, 16),
+    text_item("已抵", 764, 639, 25, 16),
+    text_item("下单得2000", 766, 592, 67, 15),
+    text_item("浏览15秒", 776, 537, 48, 18),
+    text_item("得600", 782, 553, 39, 14),
+    text_item("抢", 802, 367, 31, 30),
+    text_item("抢", 804, 649, 28, 28),
+]
+
+
 class ProductPageEntryTest(unittest.TestCase):
     """商品详情页上的营销文案不能被当成淘宝首页的淘金币入口。
 
@@ -2699,6 +2730,34 @@ class ProductPageEntryTest(unittest.TestCase):
 
         self.assertIsNotNone(got)
         self.assertEqual(context.controller.index, 0, "恢复流程又截了一次图")
+
+    def test_feed_page_label_is_not_a_home_entry(self) -> None:
+        """金币超级爆款商品流页上的「官方|专享|淘金币」不是首页入口。
+
+        真机 2026-10-26 11:41:55 那一帧（本文件 PRODUCT_FEED 逐块照抄）。
+        竖线是几枚角标并排被 OCR 连成一块的分隔符，首页那排图标不会带。
+        """
+        items = panel.parse_ocr_items(PRODUCT_FEED)
+        self.assertIsNone(
+            panel.coin_entry_point(items),
+            "商品流页的角标「官方|专享|淘金币」被当成首页入口",
+        )
+
+    def test_keyword_center_would_have_landed_on_the_feed_label(self) -> None:
+        """记录成因：按字符占比折算出的 (542,247) 正是角标里那三个字。"""
+        items = panel.parse_ocr_items(PRODUCT_FEED)
+        label = panel.find_text_by_keywords(items, ("官方|专享|淘金币",))
+        assert label is not None
+        self.assertEqual(panel.keyword_center(label, "淘金币"), (542, 247))
+
+    def test_energy_recovery_leaves_the_feed_page_with_back(self) -> None:
+        """商品流页上没有首页入口，只能按返回退出，不能点角标。"""
+        context = FakeContext([PRODUCT_FEED, COIN_HOME, ENERGY_PANEL])
+
+        self.assertTrue(actions.open_energy_page(context, fast_config()))
+
+        self.assertNotIn((542, 247), context.controller.clicks)
+        self.assertTrue(context.controller.keys)
 
     def test_stale_frame_is_dropped_when_taobao_is_brought_back(self) -> None:
         """恢复开头把淘宝拉回前台时，调用方那一帧已经不作数了。
