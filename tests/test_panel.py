@@ -1701,6 +1701,25 @@ class ProgressTest(unittest.TestCase):
         # 0/3、1/3、2/3 各做一次；3/3 已做满不再点。
         self.assertEqual(len(context.controller.clicks), 3)
 
+    def test_abandoned_task_is_retried_when_same_name_later_progresses(self) -> None:
+        """同名任务后来进度增加时，不能沿用旧的永久放弃记录。"""
+        def panel_with(progress: int) -> list[dict]:
+            return [
+                text_item("赚金币抵钱", 100, 150, 300, 48),
+                text_item("今日累计奖励", 100, 220, 240, 40),
+                text_item(f"浏览商品({progress}/3)", 100, 300),
+                text_item("去完成", 900, 300, 120, 40),
+            ]
+
+        # 前两次没有推进，任务被暂时放弃；之后同名行重新出现并已推进，
+        # 应恢复尝试，而不是在 pick_task 阶段继续被 exclude 拦住。
+        screens = [panel_with(0), panel_with(0), panel_with(1), panel_with(2), panel_with(3)]
+        context = FakeContext(screens)
+        result = actions.run_daily_loop(context, fast_config(), max_rounds=8)
+
+        self.assertTrue(result)
+        self.assertEqual(len(context.controller.clicks), 4)
+
 
 class ProgressBacktrackTest(unittest.TestCase):
     """进度读数倒退，不是「这个任务没进展」。

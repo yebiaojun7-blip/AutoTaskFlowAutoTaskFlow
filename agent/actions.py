@@ -1082,6 +1082,7 @@ def _run_panel_loop(
     # 就会把轮次全部耗在它身上。这里按任务名记执行次数，超过上限就放弃。
     tried: dict[str, int] = {}
     abandoned: set[str] = set()
+    abandoned_progress: dict[str, tuple[int, int]] = {}
     # 每个任务「点了但页面没反应」的次数。空点不是任务的错，但也不能无限重试。
     no_ops: dict[str, int] = {}
     # 每个任务上一次看到的 (x/y) 进度。判断「有没有推进」必须跟上一轮比，
@@ -1148,6 +1149,26 @@ def _run_panel_loop(
             # 成功找回面板不算空轮次：否则 max_empty_rounds=1 时
             # 刚恢复就被判定为"今日任务已完成"，直接结束整轮任务。
             continue
+
+        # 任务名称会随机变化；同名任务后来出现更大的进度时，说明它不是之前
+        # 那次卡住的同一个状态，不能让旧的放弃记录永久挡住它。
+        for item in items:
+            name = panel.dedupe_key(item.text)
+            progress = panel.task_progress(item.text)
+            blocked = abandoned_progress.get(name)
+            if blocked is not None and progress is not None and progress[0] > blocked[0]:
+                abandoned.discard(name)
+                abandoned_progress.pop(name, None)
+                tried.pop(name, None)
+                last_progress.pop(name, None)
+                LOGGER.info(
+                    "任务「%s」进度从 %d/%d 增长到 %d/%d，恢复尝试",
+                    name,
+                    blocked[0],
+                    blocked[1],
+                    progress[0],
+                    progress[1],
+                )
 
         # 面板本身能判断"做完了"时不必再扫：主账号没有进度行，走 pick_task 兜底；
         # 分身账号有「完成进度 n/m」，n>=m 即完成。
@@ -1294,6 +1315,9 @@ def _run_panel_loop(
             context, name, tried, max_attempts, last_progress, seen=recovered
         ):
             abandoned.add(name)
+            progress = last_progress.get(name)
+            if progress is not None:
+                abandoned_progress[name] = progress
             stuck_at = last_progress.get(name)
             # 把读数写进日志：只说「没进展」，下一次还得重新翻日志找屏幕上是几比几。
             if stuck_at is None:
