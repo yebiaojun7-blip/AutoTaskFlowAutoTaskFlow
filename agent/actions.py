@@ -698,6 +698,7 @@ def _recover_to_panel(
     *,
     tries: int = 6,
     profile: PanelProfile = COIN_PROFILE,
+    first: Sequence[panel.OcrItem] | None = None,
 ) -> list[panel.OcrItem] | None:
     """把界面拉回目标任务面板，成功时返回面板上的识别结果。
 
@@ -719,9 +720,17 @@ def _recover_to_panel(
     所以只能往下滑找入口，实在不行重启淘宝，唯独不能按返回。
 
     profile 决定目标面板：能量任务走到赛车首页时要点「去赚能量」而不是「赚金币」。
+
+    first 是调用方刚扫出来的识别结果。主循环判完「不在面板上」之后就调这里，
+    而那次判定用的正是这一帧 —— 不传进来就得对同一张没变过的界面重扫一遍，
+    真机上一次全屏 OCR 十几到三十几秒，白花的正好是最贵的那一步。
+
+    但只有界面没被动过才敢复用：下面这一步可能把淘宝重新拉回前台，那之后
+    屏幕已经不是 first 那一张了，必须重新识别。
     """
     if _ensure_taobao_foreground(context, config):
         LOGGER.info("已重新打开淘宝，继续找%s", profile.name)
+        first = None
 
     home_tries = 0
     # 已经点空过的入口坐标。首页那排图标会被 OCR 合并成一整块，按字符占比
@@ -750,7 +759,10 @@ def _recover_to_panel(
         return repeats
 
     for _ in range(tries):
-        items = _scan(context)
+        if first is not None:
+            items, first = first, None
+        else:
+            items = _scan(context)
 
         # 确认框必须先于「在面板上」判断：它盖在面板上方，但面板文字依然能被识别，
         # 先判面板就会以为一切正常，然后不断点在弹框上。
@@ -1110,7 +1122,10 @@ def _run_panel_loop(
 
         if not profile.visible(items):
             LOGGER.info("第 %d 轮：不在%s，尝试恢复", round_index, profile.name)
-            if _recover_to_panel(context, config, profile=profile) is None:
+            # 把刚扫出来的这一帧交给恢复流程：它开头第一件事就是判「现在在哪」，
+            # 而这一帧正是那个判断的依据。不传进去就得对同一张界面再扫一遍，
+            # 真机上一次全屏 OCR 十几到三十几秒。
+            if _recover_to_panel(context, config, profile=profile, first=items) is None:
                 lost_streak += 1
                 # 一次恢复失败不能终止整个任务：真机 09:35 那次只做了 8 轮就被
                 # 判「回不到面板」中止，而屏上还有一多半任务没做。只有连续多次
@@ -1262,7 +1277,9 @@ def _run_panel_loop(
                     no_ops[name],
                 )
             # 界面没变，上一轮的识别结果仍然有效，不必再扫一遍。
-            pregained = None
+            # 能给这份结果的正是 TASK_NOTHING 的定义本身：它只在「任务行原封不动、
+            # 也没弹出确认框」时返回，那时屏幕和点之前是同一张。
+            pregained = items
             _sleep(_random_delay(config))
             continue
 

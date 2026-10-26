@@ -2684,6 +2684,42 @@ class ProductPageEntryTest(unittest.TestCase):
         self.assertTrue(context.controller.keys)
         self.assertEqual(context.controller.started, [])
 
+    def test_recovery_reuses_the_frame_the_caller_already_scanned(self) -> None:
+        """调用方刚扫出来的那一帧要直接交给恢复流程，不再对同一屏重扫一次。
+
+        主循环判完「不在面板上」就调恢复，而那个判断用的正是这一帧；
+        再截一张图跑一次全屏 OCR，真机上就是十几到三十几秒的白等。
+        """
+        context = FakeContext([ENERGY_PANEL])
+        items = panel.parse_ocr_items(ENERGY_PANEL)
+
+        got = actions._recover_to_panel(
+            context, fast_config(), profile=actions.ENERGY_PROFILE, first=items
+        )
+
+        self.assertIsNotNone(got)
+        self.assertEqual(context.controller.index, 0, "恢复流程又截了一次图")
+
+    def test_stale_frame_is_dropped_when_taobao_is_brought_back(self) -> None:
+        """恢复开头把淘宝拉回前台时，调用方那一帧已经不作数了。
+
+        否则会拿「回到淘宝之前」的旧画面去判现在在哪 —— 那是一张别的应用的
+        截图，判出来的结论和眼前这屏没有关系。
+        """
+        context = FakeContext([ENERGY_PANEL])
+        context.controller.foreground = "com.eg.android.AlipayGphone"
+        items = panel.parse_ocr_items(
+            [text_item("任意下单最高另得500淘金币", 645, 33, 155, 13)]
+        )
+
+        got = actions._recover_to_panel(
+            context, fast_config(), profile=actions.ENERGY_PROFILE, first=items
+        )
+
+        self.assertIsNotNone(got)
+        self.assertGreaterEqual(context.controller.index, 1, "旧画面被当成现场了")
+        self.assertNotIn((783, 39), context.controller.clicks)
+
 
 class EnergyLoopTest(unittest.TestCase):
     """能量面板主循环：做任务、跳过做不了的、自己收尾退出。"""
@@ -3064,6 +3100,45 @@ class NoOpTaskTest(unittest.TestCase):
     def test_no_op_task_is_retried_before_being_abandoned(self) -> None:
         """空点不是任务的错：要重试几次，不能一次就放弃。"""
         self.assertGreaterEqual(actions._MAX_NO_OP_RETRIES, 2)
+
+    def test_no_op_round_does_not_rescan_the_unchanged_panel(self) -> None:
+        """空点之后界面没变，下一轮不该再截一张图跑全屏 OCR。
+
+        TASK_NOTHING 的定义就是「任务行原封不动、也没弹确认框」——屏幕和点之前
+        是同一张。主循环原先在这一支里把识别结果丢掉、下一轮重新扫一遍，而真机
+        上一次全屏 OCR 十几到三十几秒，这等于替「什么都没发生」付一次最贵的代价。
+
+        这里把 _wait_for 换成「只扫一次」，让计数只反映主循环自己的扫描：
+        两轮各一次任务内扫描，第二轮不该再多出一次整屏扫描。
+        """
+        jump_row = [
+            text_item("赚金币抵钱", 100, 150, 300, 48),
+            text_item("今日累计奖励", 100, 220, 240, 40),
+            text_item("去蚂蚁庄园逛逛哟(0/1)", 100, 300),
+            text_item("去逛逛", 900, 300, 120, 40),
+        ]
+        context = FakeContext([jump_row] * 6)
+        config = fast_config()
+        config["timing"]["max_attempts_per_task"] = 1
+
+        original_wait = actions._wait_for
+        actions._wait_for = lambda predicate, ctx, *, tries, delay: actions._scan(ctx)
+        try:
+            actions.run_daily_loop(context, config, max_rounds=2)
+        finally:
+            actions._wait_for = original_wait
+
+        # 第 1 轮：主循环扫描 1 次 + 任务内确认 1 次 = 2。
+        # 第 2 轮：主循环沿用上一轮的识别结果 = 0，再加任务内确认 1 次。
+        # 丢掉识别结果的话，第 2 轮会变成 2 次，总数 6。
+        self.assertLessEqual(
+            context.controller.index,
+            5,
+            "空点之后又对没变过的面板重扫了一遍",
+        )
+        # 5 = 第 1 轮 3 次（主循环 1 + 跳转确认 2）+ 第 2 轮 2 次（复用，只剩确认）。
+        # 丢掉识别结果的话第 2 轮会多出一次主循环扫描，变成 6。
+        self.assertEqual(context.controller.index, 5)
 
     def test_jump_that_left_the_panel_leaves_a_trace(self) -> None:
         """真的跳出去了也要留一行日志。
